@@ -33,6 +33,10 @@ cd codex-android
 ./gradlew :app:installDebug
 adb shell am start -n com.local.codexmobile/.MainActivity
 ```
+or
+```bash
+./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
 
 ## PC-side setup (Tailnet host)
 

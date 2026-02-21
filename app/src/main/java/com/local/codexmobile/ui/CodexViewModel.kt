@@ -23,12 +23,15 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+enum class Screen { SETUP, CHAT }
+
 class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private val serverStore = ServerStore(application)
 
     val servers = mutableStateListOf<ServerConfig>()
     val threads = mutableStateListOf<ThreadSummary>()
     val messages = mutableStateListOf<ChatMessage>()
+    val recentCwds = mutableStateListOf<String>()
 
     var selectedServerId by mutableStateOf<String?>(null)
         private set
@@ -43,6 +46,8 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var isThinking by mutableStateOf(false)
         private set
+    var currentScreen by mutableStateOf(Screen.SETUP)
+        private set
 
     private var client: CodexAppServerClient? = null
 
@@ -50,6 +55,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         val loaded = serverStore.loadServers()
         servers.addAll(loaded)
         selectedServerId = loaded.firstOrNull()?.id
+        recentCwds.addAll(serverStore.loadRecentCwds())
     }
 
     fun selectServer(id: String) {
@@ -159,6 +165,8 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                 activeCwd = cwd
                 messages.clear()
                 status = "Thread started"
+                recordCwd(cwd)
+                currentScreen = Screen.CHAT
                 refreshThreads()
             } catch (t: Throwable) {
                 val err = "thread/start failed: ${t.message ?: "unknown"}"
@@ -178,6 +186,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                 messages.clear()
                 messages.addAll(restoreMessagesFromResume(response))
                 status = "Resumed ${summary.id.take(10)}"
+                currentScreen = Screen.CHAT
             } catch (t: Throwable) {
                 val err = "thread/resume failed: ${t.message ?: "unknown"}"
                 status = err
@@ -203,6 +212,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val threadId = activeThreadId ?: rpc.startThread(cwd = activeCwd).also {
                     activeThreadId = it
+                    recordCwd(activeCwd)
                     refreshThreads()
                 }
 
@@ -235,8 +245,18 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun navigateToSetup() {
+        currentScreen = Screen.SETUP
+    }
+
     fun dismissBlockingError() {
         blockingError = null
+    }
+
+    private fun recordCwd(cwd: String) {
+        serverStore.addRecentCwd(cwd)
+        recentCwds.clear()
+        recentCwds.addAll(serverStore.loadRecentCwds())
     }
 
     private fun selectedServer(): ServerConfig? {

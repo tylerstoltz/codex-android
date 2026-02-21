@@ -29,7 +29,23 @@ class ServerStore(context: Context) {
         )
     }
 
+    fun loadRecentCwds(): List<String> {
+        val raw = prefs.getString(KEY_RECENT_CWDS, null) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<String>>(raw) }.getOrDefault(emptyList())
+    }
+
+    fun addRecentCwd(cwd: String) {
+        val trimmed = cwd.trim()
+        if (trimmed.isEmpty()) return
+        val current = loadRecentCwds().toMutableList()
+        current.remove(trimmed)
+        current.add(0, trimmed)
+        val capped = current.take(10)
+        prefs.edit().putString(KEY_RECENT_CWDS, json.encodeToString(capped)).apply()
+    }
+
     companion object {
         private const val KEY_SERVERS = "servers"
+        private const val KEY_RECENT_CWDS = "recent_cwds"
     }
 }

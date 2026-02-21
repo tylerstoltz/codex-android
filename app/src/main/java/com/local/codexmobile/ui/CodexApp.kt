@@ -8,27 +8,32 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -63,19 +68,32 @@ import com.local.codexmobile.ui.theme.CodexUserBubble
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CodexApp(viewModel: CodexViewModel = viewModel()) {
+    when (viewModel.currentScreen) {
+        Screen.SETUP -> SetupScreen(viewModel)
+        Screen.CHAT -> ChatScreen(viewModel)
+    }
+
+    viewModel.blockingError?.let { message ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Connection Error") },
+            text = { Text(message) },
+            confirmButton = {
+                Button(onClick = { viewModel.dismissBlockingError() }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SetupScreen(viewModel: CodexViewModel) {
     var newServerName by remember { mutableStateOf("") }
     var newServerHost by remember { mutableStateOf("") }
     var newServerPort by remember { mutableStateOf("8390") }
-    var inputText by remember { mutableStateOf("") }
     var cwd by remember { mutableStateOf(viewModel.activeCwd) }
-
-    val messageListState = rememberLazyListState()
-
-    LaunchedEffect(viewModel.messages.size) {
-        if (viewModel.messages.isNotEmpty()) {
-            messageListState.animateScrollToItem(viewModel.messages.lastIndex)
-        }
-    }
 
     Scaffold(
         topBar = {
@@ -109,7 +127,8 @@ fun CodexApp(viewModel: CodexViewModel = viewModel()) {
                 .fillMaxSize()
                 .padding(padding)
                 .background(CodexBg)
-                .padding(12.dp),
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             ServerSection(
@@ -137,6 +156,7 @@ fun CodexApp(viewModel: CodexViewModel = viewModel()) {
 
             SessionSection(
                 threads = viewModel.threads,
+                recentCwds = viewModel.recentCwds,
                 cwd = cwd,
                 onCwdChange = {
                     cwd = it
@@ -146,14 +166,68 @@ fun CodexApp(viewModel: CodexViewModel = viewModel()) {
                 onStart = { viewModel.startThread(cwd.ifBlank { "/tmp" }) },
                 onResume = viewModel::resumeThread
             )
+        }
+    }
+}
 
-            Divider(color = Color(0x22FFFFFF))
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatScreen(viewModel: CodexViewModel) {
+    var inputText by remember { mutableStateOf("") }
+    val messageListState = rememberLazyListState()
 
+    LaunchedEffect(viewModel.messages.size) {
+        if (viewModel.messages.isNotEmpty()) {
+            messageListState.animateScrollToItem(viewModel.messages.lastIndex)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = { viewModel.navigateToSetup() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                title = {
+                    Column {
+                        Text(
+                            text = viewModel.activeThreadId?.take(12) ?: "New Session",
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = viewModel.status,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (viewModel.isConnected) CodexGreen else Color.LightGray
+                        )
+                    }
+                },
+                actions = {
+                    if (viewModel.isThinking) {
+                        IconButton(onClick = { viewModel.interruptTurn() }) {
+                            Icon(Icons.Default.Stop, contentDescription = "Interrupt")
+                        }
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(CodexBg)
+                .imePadding()
+        ) {
             LazyColumn(
                 state = messageListState,
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(viewModel.messages) { message ->
@@ -161,31 +235,20 @@ fun CodexApp(viewModel: CodexViewModel = viewModel()) {
                 }
             }
 
-            InputSection(
-                value = inputText,
-                onValueChange = { inputText = it },
-                onSend = {
-                    viewModel.sendMessage(inputText)
-                    inputText = ""
-                },
-                onInterrupt = viewModel::interruptTurn,
-                isThinking = viewModel.isThinking,
-                enabled = viewModel.isConnected
-            )
-        }
-    }
-
-    viewModel.blockingError?.let { message ->
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("Connection Error") },
-            text = { Text(message) },
-            confirmButton = {
-                Button(onClick = { viewModel.dismissBlockingError() }) {
-                    Text("Close")
-                }
+            Column(modifier = Modifier.padding(12.dp)) {
+                InputSection(
+                    value = inputText,
+                    onValueChange = { inputText = it },
+                    onSend = {
+                        viewModel.sendMessage(inputText)
+                        inputText = ""
+                    },
+                    onInterrupt = viewModel::interruptTurn,
+                    isThinking = viewModel.isThinking,
+                    enabled = viewModel.isConnected
+                )
             }
-        )
+        }
     }
 }
 
@@ -272,15 +335,20 @@ private fun ServerSection(
     }
 }
 
+@Suppress("DEPRECATION")
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SessionSection(
     threads: List<ThreadSummary>,
+    recentCwds: List<String>,
     cwd: String,
     onCwdChange: (String) -> Unit,
     onRefresh: () -> Unit,
     onStart: () -> Unit,
     onResume: (ThreadSummary) -> Unit
 ) {
+    var cwdDropdownExpanded by remember { mutableStateOf(false) }
+
     Card(colors = CardDefaults.cardColors(containerColor = Color(0x221E2A2C))) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Sessions", style = MaterialTheme.typography.titleSmall)
@@ -289,13 +357,44 @@ private fun SessionSection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedTextField(
-                    modifier = Modifier.weight(1f),
-                    value = cwd,
-                    onValueChange = onCwdChange,
-                    label = { Text("cwd") },
-                    singleLine = true
-                )
+                ExposedDropdownMenuBox(
+                    expanded = cwdDropdownExpanded,
+                    onExpandedChange = {
+                        if (recentCwds.isNotEmpty()) cwdDropdownExpanded = it
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    OutlinedTextField(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(),
+                        value = cwd,
+                        onValueChange = onCwdChange,
+                        label = { Text("cwd") },
+                        singleLine = true,
+                        trailingIcon = {
+                            if (recentCwds.isNotEmpty()) {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = cwdDropdownExpanded)
+                            }
+                        }
+                    )
+                    if (recentCwds.isNotEmpty()) {
+                        ExposedDropdownMenu(
+                            expanded = cwdDropdownExpanded,
+                            onDismissRequest = { cwdDropdownExpanded = false }
+                        ) {
+                            recentCwds.forEach { recent ->
+                                DropdownMenuItem(
+                                    text = { Text(recent, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    onClick = {
+                                        onCwdChange(recent)
+                                        cwdDropdownExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
                 IconButton(onClick = onRefresh) {
                     Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                 }
@@ -371,7 +470,7 @@ private fun InputSection(
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onSend, enabled = enabled && value.isNotBlank() && !isThinking) {
-                Icon(Icons.Default.Send, contentDescription = null)
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                 Spacer(modifier = Modifier.size(6.dp))
                 Text("Send")
             }
