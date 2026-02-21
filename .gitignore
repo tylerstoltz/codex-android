@@ -5,3 +5,21 @@
 **/build/
 *.iml
 .DS_Store
+
+# Claude Code local configuration
+.claude/
+
+# Build artifacts
+*.apk
+*.aab
+
+# Signing keys
+*.jks
+*.keystore
+
+# Environment files
+.env
+.env.*
+
+# Firebase/Google services config
+google-services.json
