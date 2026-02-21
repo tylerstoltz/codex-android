@@ -37,6 +37,7 @@ class CodexAppServerClient(
     private val json = Json {
         ignoreUnknownKeys = true
         explicitNulls = false
+        encodeDefaults = true
     }
 
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonElement>>()
