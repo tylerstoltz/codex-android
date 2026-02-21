@@ -76,7 +76,7 @@ class CodexAppServerClient(
             }
 
             val suffix = lastError?.message?.let { ": $it" }.orEmpty()
-            error("Invalid URL. raw='$host' normalized=${candidates.joinToString("|")}$suffix")
+            error("Connect failed.  raw='$host'\nnormalized=${candidates.joinToString("|")}$suffix")
         }
     }
 
@@ -115,7 +115,6 @@ class CodexAppServerClient(
             append("Connection: Upgrade\r\n")
             append("Sec-WebSocket-Key: $wsKeyBase64\r\n")
             append("Sec-WebSocket-Version: 13\r\n")
-            append("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits; client_no_context_takeover; server_no_context_takeover\r\n")
             append("\r\n")
         }
 
@@ -358,7 +357,9 @@ class CodexAppServerClient(
                 )
             )
         )
-        sendNotification("initialized", buildJsonObject {})
+        withContext(Dispatchers.IO) {
+            sendNotification("initialized", buildJsonObject {})
+        }
     }
 
     suspend fun listThreads(cwd: String? = null): List<ThreadSummary> {
@@ -436,7 +437,9 @@ class CodexAppServerClient(
             }
         }
 
-        val sent = sendText(json.encodeToString(payload))
+        val sent = withContext(Dispatchers.IO) {
+            sendText(json.encodeToString(payload))
+        }
         if (!sent) {
             pending.remove(id)
             error("Failed to send request: socket not connected")
