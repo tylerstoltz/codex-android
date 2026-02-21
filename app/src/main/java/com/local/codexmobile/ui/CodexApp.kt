@@ -440,12 +440,20 @@ private fun MessageBubble(message: ChatMessage) {
             modifier = Modifier.fillMaxWidth(0.9f)
         ) {
             Text(
-                text = message.text,
+                text = stripMarkdown(message.text),
                 modifier = Modifier.padding(10.dp),
                 style = MaterialTheme.typography.bodyMedium
             )
         }
     }
+}
+
+private fun stripMarkdown(text: String): String {
+    return text
+        .replace(Regex("```[a-zA-Z]*\\n?"), "")   // opening code fences
+        .replace("```", "")                         // closing code fences
+        .replace(Regex("`([^`]+)`"), "$1")          // inline code
+        .replace(Regex("\\*\\*([^*]+)\\*\\*"), "$1") // bold
 }
 
 @Composable

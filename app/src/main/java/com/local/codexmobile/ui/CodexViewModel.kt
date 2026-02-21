@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -97,7 +98,9 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                 val rpc = CodexAppServerClient(
                     onNotification = { method, params ->
                         viewModelScope.launch(Dispatchers.Main) {
-                            handleNotification(method, params)
+                            try {
+                                handleNotification(method, params)
+                            } catch (_: Throwable) { }
                         }
                     },
                     onConnectionChanged = { connected ->
@@ -307,16 +310,21 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private fun renderSystemItem(type: String, item: JsonObject) {
         val text = when (type) {
             "commandExecution" -> {
-                val command = item["command"]?.jsonArray?.joinToString(" ") {
-                    it.jsonPrimitive.contentOrNull.orEmpty()
-                }.orEmpty()
-                val exitCode = item["exitCode"]?.jsonPrimitive?.contentOrNull ?: "?"
+                val cmdElement = item["command"]
+                val command = when {
+                    cmdElement is JsonArray -> cmdElement.mapNotNull {
+                        (it as? JsonPrimitive)?.contentOrNull
+                    }.joinToString(" ")
+                    cmdElement is JsonPrimitive -> cmdElement.contentOrNull.orEmpty()
+                    else -> ""
+                }
+                val exitCode = (item["exitCode"] as? JsonPrimitive)?.contentOrNull ?: "?"
                 "Command finished (exit $exitCode): $command"
             }
 
             "fileChange" -> {
-                val status = item["status"]?.jsonPrimitive?.contentOrNull ?: "unknown"
-                "File change: $status"
+                val fileStatus = (item["status"] as? JsonPrimitive)?.contentOrNull ?: "unknown"
+                "File change: $fileStatus"
             }
 
             "reasoning" -> "Reasoning updated"
