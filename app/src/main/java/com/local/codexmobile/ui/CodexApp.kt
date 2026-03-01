@@ -191,11 +191,131 @@ private fun SetupScreen(viewModel: CodexViewModel) {
 @Composable
 private fun ChatScreen(viewModel: CodexViewModel) {
     var inputText by remember { mutableStateOf("") }
+    var isListeningForMessage by remember { mutableStateOf(false) }
+    var voiceInputStatus by remember { mutableStateOf<String?>(null) }
+    var pendingAutoListen by remember { mutableStateOf(false) }
+    var previousThinking by remember { mutableStateOf(viewModel.isThinking) }
     val messageListState = rememberLazyListState()
+
+    fun applyDraftValue(newValue: String) {
+        val command = parseVoiceCommandFromDraft(newValue, viewModel.voiceControlSettings)
+        if (command == null) {
+            inputText = newValue
+            return
+        }
+
+        when (command.action) {
+            VoiceCommandAction.SEND -> {
+                if (command.payload.isBlank()) {
+                    inputText = ""
+                } else if (viewModel.isConnected && !viewModel.isThinking) {
+                    viewModel.sendMessage(command.payload)
+                    inputText = ""
+                } else {
+                    inputText = command.payload
+                }
+            }
+
+            VoiceCommandAction.INTERRUPT -> {
+                if (viewModel.isConnected && viewModel.isThinking) {
+                    viewModel.interruptTurn()
+                }
+                inputText = ""
+            }
+
+            VoiceCommandAction.CLEAR -> {
+                inputText = ""
+            }
+        }
+    }
+
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        isListeningForMessage = false
+        val spokenText = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+
+        if (result.resultCode == Activity.RESULT_OK && spokenText.isNotBlank()) {
+            voiceInputStatus = null
+            applyDraftValue(spokenText)
+        } else {
+            voiceInputStatus = "No speech captured."
+        }
+    }
+
+    fun startVoiceInput(auto: Boolean) {
+        if (!viewModel.voiceControlSettings.enabled || !viewModel.isConnected || viewModel.isThinking || isListeningForMessage) {
+            return
+        }
+        isListeningForMessage = true
+        voiceInputStatus = if (auto) "Listening for next message..." else "Listening..."
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(
+                RecognizerIntent.EXTRA_PROMPT,
+                if (auto) "Speak your next message" else "Speak your message"
+            )
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            isListeningForMessage = false
+            voiceInputStatus = "Speech recognizer is not available on this device."
+        }
+    }
 
     LaunchedEffect(viewModel.messages.size) {
         if (viewModel.messages.isNotEmpty()) {
             messageListState.animateScrollToItem(viewModel.messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(viewModel.voiceControlSettings.enabled) {
+        if (!viewModel.voiceControlSettings.enabled) {
+            pendingAutoListen = false
+            voiceInputStatus = null
+            return@LaunchedEffect
+        }
+        if (viewModel.isConnected && !viewModel.isThinking && inputText.isBlank()) {
+            pendingAutoListen = true
+        }
+    }
+
+    LaunchedEffect(viewModel.isThinking, viewModel.voiceControlSettings.enabled) {
+        if (!viewModel.voiceControlSettings.enabled) {
+            previousThinking = viewModel.isThinking
+            pendingAutoListen = false
+            return@LaunchedEffect
+        }
+        if (previousThinking && !viewModel.isThinking) {
+            pendingAutoListen = true
+        }
+        previousThinking = viewModel.isThinking
+    }
+
+    LaunchedEffect(
+        pendingAutoListen,
+        viewModel.voiceControlSettings.enabled,
+        viewModel.isConnected,
+        viewModel.isThinking,
+        isListeningForMessage
+    ) {
+        if (
+            pendingAutoListen &&
+            viewModel.voiceControlSettings.enabled &&
+            viewModel.isConnected &&
+            !viewModel.isThinking &&
+            !isListeningForMessage
+        ) {
+            pendingAutoListen = false
+            startVoiceInput(auto = true)
         }
     }
 
@@ -258,44 +378,18 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             Column(modifier = Modifier.padding(12.dp)) {
                 InputSection(
                     value = inputText,
-                    onValueChange = { newValue ->
-                        val command = parseVoiceCommandFromDraft(newValue, viewModel.voiceControlSettings)
-                        if (command == null) {
-                            inputText = newValue
-                        } else {
-                            when (command.action) {
-                                VoiceCommandAction.SEND -> {
-                                    if (command.payload.isBlank()) {
-                                        inputText = ""
-                                    } else if (viewModel.isConnected && !viewModel.isThinking) {
-                                        viewModel.sendMessage(command.payload)
-                                        inputText = ""
-                                    } else {
-                                        inputText = command.payload
-                                    }
-                                }
-
-                                VoiceCommandAction.INTERRUPT -> {
-                                    if (viewModel.isConnected && viewModel.isThinking) {
-                                        viewModel.interruptTurn()
-                                    }
-                                    inputText = ""
-                                }
-
-                                VoiceCommandAction.CLEAR -> {
-                                    inputText = ""
-                                }
-                            }
-                        }
-                    },
+                    onValueChange = ::applyDraftValue,
                     onSend = {
                         viewModel.sendMessage(inputText)
                         inputText = ""
                     },
                     onInterrupt = viewModel::interruptTurn,
+                    onStartVoiceInput = { startVoiceInput(auto = false) },
                     isThinking = viewModel.isThinking,
                     enabled = viewModel.isConnected,
-                    voiceControlSettings = viewModel.voiceControlSettings
+                    voiceControlSettings = viewModel.voiceControlSettings,
+                    isListeningForVoiceInput = isListeningForMessage,
+                    voiceInputStatus = voiceInputStatus
                 )
             }
         }
@@ -688,9 +782,12 @@ private fun InputSection(
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     onInterrupt: () -> Unit,
+    onStartVoiceInput: () -> Unit,
     isThinking: Boolean,
     enabled: Boolean,
-    voiceControlSettings: VoiceControlSettings
+    voiceControlSettings: VoiceControlSettings,
+    isListeningForVoiceInput: Boolean,
+    voiceInputStatus: String?
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (voiceControlSettings.enabled) {
@@ -701,6 +798,13 @@ private fun InputSection(
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.LightGray
             )
+            voiceInputStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.LightGray
+                )
+            }
         }
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
@@ -722,6 +826,16 @@ private fun InputSection(
                 Icon(Icons.Default.Stop, contentDescription = null)
                 Spacer(modifier = Modifier.size(6.dp))
                 Text("Interrupt")
+            }
+            if (voiceControlSettings.enabled) {
+                Button(
+                    onClick = onStartVoiceInput,
+                    enabled = enabled && !isThinking && !isListeningForVoiceInput
+                ) {
+                    Icon(Icons.Default.Mic, contentDescription = null)
+                    Spacer(modifier = Modifier.size(6.dp))
+                    Text(if (isListeningForVoiceInput) "Listening" else "Speak")
+                }
             }
         }
     }
