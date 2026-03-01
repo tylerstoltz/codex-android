@@ -1,5 +1,11 @@
 package com.local.codexmobile.ui
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,8 +26,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
@@ -40,7 +48,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -59,11 +69,14 @@ import com.local.codexmobile.model.ChatMessage
 import com.local.codexmobile.model.ChatRole
 import com.local.codexmobile.model.ServerConfig
 import com.local.codexmobile.model.ThreadSummary
+import com.local.codexmobile.model.VoiceCommandAction
+import com.local.codexmobile.model.VoiceControlSettings
 import com.local.codexmobile.ui.theme.CodexAssistantBubble
 import com.local.codexmobile.ui.theme.CodexBg
 import com.local.codexmobile.ui.theme.CodexGreen
 import com.local.codexmobile.ui.theme.CodexSystemBubble
 import com.local.codexmobile.ui.theme.CodexUserBubble
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,6 +84,7 @@ fun CodexApp(viewModel: CodexViewModel = viewModel()) {
     when (viewModel.currentScreen) {
         Screen.SETUP -> SetupScreen(viewModel)
         Screen.CHAT -> ChatScreen(viewModel)
+        Screen.VOICE_SETTINGS -> VoiceSettingsScreen(viewModel)
     }
 
     viewModel.blockingError?.let { message ->
@@ -109,6 +123,9 @@ private fun SetupScreen(viewModel: CodexViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { viewModel.navigateToVoiceSettings() }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Voice Settings")
+                    }
                     if (viewModel.isConnected) {
                         IconButton(onClick = { viewModel.disconnect() }) {
                             Icon(Icons.Default.Close, contentDescription = "Disconnect")
@@ -206,6 +223,9 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { viewModel.navigateToVoiceSettings() }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Voice Settings")
+                    }
                     if (viewModel.isThinking) {
                         IconButton(onClick = { viewModel.interruptTurn() }) {
                             Icon(Icons.Default.Stop, contentDescription = "Interrupt")
@@ -238,15 +258,221 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             Column(modifier = Modifier.padding(12.dp)) {
                 InputSection(
                     value = inputText,
-                    onValueChange = { inputText = it },
+                    onValueChange = { newValue ->
+                        val command = parseVoiceCommandFromDraft(newValue, viewModel.voiceControlSettings)
+                        if (command == null) {
+                            inputText = newValue
+                        } else {
+                            when (command.action) {
+                                VoiceCommandAction.SEND -> {
+                                    if (command.payload.isBlank()) {
+                                        inputText = ""
+                                    } else if (viewModel.isConnected && !viewModel.isThinking) {
+                                        viewModel.sendMessage(command.payload)
+                                        inputText = ""
+                                    } else {
+                                        inputText = command.payload
+                                    }
+                                }
+
+                                VoiceCommandAction.INTERRUPT -> {
+                                    if (viewModel.isConnected && viewModel.isThinking) {
+                                        viewModel.interruptTurn()
+                                    }
+                                    inputText = ""
+                                }
+
+                                VoiceCommandAction.CLEAR -> {
+                                    inputText = ""
+                                }
+                            }
+                        }
+                    },
                     onSend = {
                         viewModel.sendMessage(inputText)
                         inputText = ""
                     },
                     onInterrupt = viewModel::interruptTurn,
                     isThinking = viewModel.isThinking,
-                    enabled = viewModel.isConnected
+                    enabled = viewModel.isConnected,
+                    voiceControlSettings = viewModel.voiceControlSettings
                 )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VoiceSettingsScreen(viewModel: CodexViewModel) {
+    val settings = viewModel.voiceControlSettings
+    var captureTarget by remember { mutableStateOf<VoiceCommandAction?>(null) }
+    var captureStatus by remember { mutableStateOf<String?>(null) }
+
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val target = captureTarget
+        captureTarget = null
+        if (target == null) {
+            return@rememberLauncherForActivityResult
+        }
+
+        val phrase = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+
+        if (result.resultCode == Activity.RESULT_OK && phrase.isNotBlank()) {
+            viewModel.updateVoiceCommand(target, phrase)
+            captureStatus = "Saved command phrase: \"$phrase\""
+        } else {
+            captureStatus = "No phrase captured. Try recording again."
+        }
+    }
+
+    fun recordVoiceCommand(action: VoiceCommandAction, prompt: String) {
+        captureStatus = null
+        captureTarget = action
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, prompt)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            captureTarget = null
+            captureStatus = "Speech recognizer is not available on this device."
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = { viewModel.navigateBackFromVoiceSettings() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                title = { Text("Voice Control", fontWeight = FontWeight.SemiBold) }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(CodexBg)
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0x221E2A2C))) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Enable voice control", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Run Send, Interrupt, and Clear hands-free from dictated text.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.LightGray
+                        )
+                    }
+                    Switch(
+                        checked = settings.enabled,
+                        onCheckedChange = viewModel::setVoiceControlEnabled
+                    )
+                }
+            }
+
+            if (captureTarget != null) {
+                Text("Listening for command phrase...", color = CodexGreen)
+            }
+            captureStatus?.let { message ->
+                Text(message, color = Color.LightGray)
+            }
+
+            VoiceCommandRow(
+                title = "Send command",
+                description = "Spoken phrase that sends the current draft.",
+                phrase = settings.sendCommand,
+                onRecord = {
+                    recordVoiceCommand(
+                        action = VoiceCommandAction.SEND,
+                        prompt = "Speak your Send command phrase"
+                    )
+                }
+            )
+
+            VoiceCommandRow(
+                title = "Interrupt command",
+                description = "Spoken phrase that interrupts the active model turn.",
+                phrase = settings.interruptCommand,
+                onRecord = {
+                    recordVoiceCommand(
+                        action = VoiceCommandAction.INTERRUPT,
+                        prompt = "Speak your Interrupt command phrase"
+                    )
+                }
+            )
+
+            VoiceCommandRow(
+                title = "Clear command",
+                description = "Spoken phrase that clears the unsent draft.",
+                phrase = settings.clearCommand,
+                onRecord = {
+                    recordVoiceCommand(
+                        action = VoiceCommandAction.CLEAR,
+                        prompt = "Speak your Clear command phrase"
+                    )
+                }
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = { viewModel.resetVoiceCommandsToDefaults() }) {
+                    Text("Reset defaults")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceCommandRow(
+    title: String,
+    description: String,
+    phrase: String,
+    onRecord: () -> Unit
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0x221E2A2C))) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = Color.LightGray)
+                Text("Current: \"$phrase\"", style = MaterialTheme.typography.labelMedium)
+            }
+            Button(onClick = onRecord) {
+                Icon(Icons.Default.Mic, contentDescription = null)
+                Spacer(modifier = Modifier.size(6.dp))
+                Text("Record")
             }
         }
     }
@@ -463,9 +689,19 @@ private fun InputSection(
     onSend: () -> Unit,
     onInterrupt: () -> Unit,
     isThinking: Boolean,
-    enabled: Boolean
+    enabled: Boolean,
+    voiceControlSettings: VoiceControlSettings
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (voiceControlSettings.enabled) {
+            Text(
+                text = "Voice control on: \"${voiceControlSettings.sendCommand}\" / " +
+                    "\"${voiceControlSettings.interruptCommand}\" / " +
+                    "\"${voiceControlSettings.clearCommand}\"",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.LightGray
+            )
+        }
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
             value = value,
@@ -489,4 +725,97 @@ private fun InputSection(
             }
         }
     }
+}
+
+private data class VoiceCommandMatch(
+    val action: VoiceCommandAction,
+    val payload: String
+)
+
+private data class DraftToken(
+    val normalized: String,
+    val start: Int
+)
+
+private fun parseVoiceCommandFromDraft(
+    draft: String,
+    settings: VoiceControlSettings
+): VoiceCommandMatch? {
+    if (!settings.enabled) {
+        return null
+    }
+
+    val tokens = tokenizeDraft(draft)
+    if (tokens.isEmpty()) {
+        return null
+    }
+
+    val clearWords = normalizeCommandWords(settings.clearCommand)
+    if (tokensMatchExact(tokens, clearWords)) {
+        return VoiceCommandMatch(VoiceCommandAction.CLEAR, payload = "")
+    }
+
+    val interruptWords = normalizeCommandWords(settings.interruptCommand)
+    if (tokensMatchExact(tokens, interruptWords)) {
+        return VoiceCommandMatch(VoiceCommandAction.INTERRUPT, payload = "")
+    }
+
+    val sendWords = normalizeCommandWords(settings.sendCommand)
+    val sendStart = suffixStart(tokens, sendWords) ?: return null
+    val commandStartOffset = tokens[sendStart].start
+    val messagePayload = draft.substring(0, commandStartOffset)
+        .trim()
+        .trimEnd(',', ';', ':')
+        .trimEnd()
+    return VoiceCommandMatch(VoiceCommandAction.SEND, payload = messagePayload)
+}
+
+private fun tokenizeDraft(text: String): List<DraftToken> {
+    return Regex("\\S+").findAll(text).mapNotNull { match ->
+        val normalized = normalizeToken(match.value)
+        if (normalized.isEmpty()) {
+            null
+        } else {
+            DraftToken(normalized = normalized, start = match.range.first)
+        }
+    }.toList()
+}
+
+private fun normalizeCommandWords(command: String): List<String> {
+    return command
+        .split(Regex("\\s+"))
+        .map { normalizeToken(it) }
+        .filter { it.isNotEmpty() }
+}
+
+private fun normalizeToken(token: String): String {
+    return token
+        .lowercase()
+        .replace(Regex("^[^\\p{L}\\p{N}]+"), "")
+        .replace(Regex("[^\\p{L}\\p{N}]+$"), "")
+}
+
+private fun tokensMatchExact(tokens: List<DraftToken>, commandWords: List<String>): Boolean {
+    if (commandWords.isEmpty() || tokens.size != commandWords.size) {
+        return false
+    }
+    for (index in commandWords.indices) {
+        if (tokens[index].normalized != commandWords[index]) {
+            return false
+        }
+    }
+    return true
+}
+
+private fun suffixStart(tokens: List<DraftToken>, commandWords: List<String>): Int? {
+    if (commandWords.isEmpty() || tokens.size < commandWords.size) {
+        return null
+    }
+    val start = tokens.size - commandWords.size
+    for (index in commandWords.indices) {
+        if (tokens[start + index].normalized != commandWords[index]) {
+            return null
+        }
+    }
+    return start
 }

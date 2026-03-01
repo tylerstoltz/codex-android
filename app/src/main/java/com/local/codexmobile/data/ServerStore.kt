@@ -1,7 +1,11 @@
 package com.local.codexmobile.data
 
 import android.content.Context
+import com.local.codexmobile.model.DEFAULT_CLEAR_COMMAND
+import com.local.codexmobile.model.DEFAULT_INTERRUPT_COMMAND
+import com.local.codexmobile.model.DEFAULT_SEND_COMMAND
 import com.local.codexmobile.model.ServerConfig
+import com.local.codexmobile.model.VoiceControlSettings
 import java.util.UUID
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -44,8 +48,39 @@ class ServerStore(context: Context) {
         prefs.edit().putString(KEY_RECENT_CWDS, json.encodeToString(capped)).apply()
     }
 
+    fun loadVoiceControlSettings(): VoiceControlSettings {
+        return VoiceControlSettings(
+            enabled = prefs.getBoolean(KEY_VOICE_CONTROL_ENABLED, false),
+            sendCommand = prefs.getString(KEY_VOICE_COMMAND_SEND, DEFAULT_SEND_COMMAND)
+                .orEmpty()
+                .ifBlank { DEFAULT_SEND_COMMAND },
+            interruptCommand = prefs.getString(KEY_VOICE_COMMAND_INTERRUPT, DEFAULT_INTERRUPT_COMMAND)
+                .orEmpty()
+                .ifBlank { DEFAULT_INTERRUPT_COMMAND },
+            clearCommand = prefs.getString(KEY_VOICE_COMMAND_CLEAR, DEFAULT_CLEAR_COMMAND)
+                .orEmpty()
+                .ifBlank { DEFAULT_CLEAR_COMMAND }
+        )
+    }
+
+    fun saveVoiceControlSettings(settings: VoiceControlSettings) {
+        prefs.edit()
+            .putBoolean(KEY_VOICE_CONTROL_ENABLED, settings.enabled)
+            .putString(KEY_VOICE_COMMAND_SEND, settings.sendCommand.trim().ifBlank { DEFAULT_SEND_COMMAND })
+            .putString(
+                KEY_VOICE_COMMAND_INTERRUPT,
+                settings.interruptCommand.trim().ifBlank { DEFAULT_INTERRUPT_COMMAND }
+            )
+            .putString(KEY_VOICE_COMMAND_CLEAR, settings.clearCommand.trim().ifBlank { DEFAULT_CLEAR_COMMAND })
+            .apply()
+    }
+
     companion object {
         private const val KEY_SERVERS = "servers"
         private const val KEY_RECENT_CWDS = "recent_cwds"
+        private const val KEY_VOICE_CONTROL_ENABLED = "voice_control_enabled"
+        private const val KEY_VOICE_COMMAND_SEND = "voice_command_send"
+        private const val KEY_VOICE_COMMAND_INTERRUPT = "voice_command_interrupt"
+        private const val KEY_VOICE_COMMAND_CLEAR = "voice_command_clear"
     }
 }

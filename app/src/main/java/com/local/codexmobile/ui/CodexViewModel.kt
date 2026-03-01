@@ -11,8 +11,13 @@ import com.local.codexmobile.data.CodexAppServerClient
 import com.local.codexmobile.data.ServerStore
 import com.local.codexmobile.model.ChatMessage
 import com.local.codexmobile.model.ChatRole
+import com.local.codexmobile.model.DEFAULT_CLEAR_COMMAND
+import com.local.codexmobile.model.DEFAULT_INTERRUPT_COMMAND
+import com.local.codexmobile.model.DEFAULT_SEND_COMMAND
 import com.local.codexmobile.model.ServerConfig
 import com.local.codexmobile.model.ThreadSummary
+import com.local.codexmobile.model.VoiceCommandAction
+import com.local.codexmobile.model.VoiceControlSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
@@ -24,7 +29,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
-enum class Screen { SETUP, CHAT }
+enum class Screen { SETUP, CHAT, VOICE_SETTINGS }
 
 class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private val serverStore = ServerStore(application)
@@ -49,14 +54,18 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var currentScreen by mutableStateOf(Screen.SETUP)
         private set
+    var voiceControlSettings by mutableStateOf(VoiceControlSettings())
+        private set
 
     private var client: CodexAppServerClient? = null
+    private var lastScreenBeforeVoiceSettings = Screen.SETUP
 
     init {
         val loaded = serverStore.loadServers()
         servers.addAll(loaded)
         selectedServerId = loaded.firstOrNull()?.id
         recentCwds.addAll(serverStore.loadRecentCwds())
+        voiceControlSettings = serverStore.loadVoiceControlSettings()
     }
 
     fun selectServer(id: String) {
@@ -250,6 +259,48 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
 
     fun navigateToSetup() {
         currentScreen = Screen.SETUP
+    }
+
+    fun navigateToVoiceSettings() {
+        if (currentScreen != Screen.VOICE_SETTINGS) {
+            lastScreenBeforeVoiceSettings = currentScreen
+        }
+        currentScreen = Screen.VOICE_SETTINGS
+    }
+
+    fun navigateBackFromVoiceSettings() {
+        currentScreen = if (lastScreenBeforeVoiceSettings == Screen.VOICE_SETTINGS) {
+            Screen.SETUP
+        } else {
+            lastScreenBeforeVoiceSettings
+        }
+    }
+
+    fun setVoiceControlEnabled(enabled: Boolean) {
+        voiceControlSettings = voiceControlSettings.copy(enabled = enabled)
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun updateVoiceCommand(action: VoiceCommandAction, phrase: String) {
+        val trimmed = phrase.trim()
+        if (trimmed.isEmpty()) {
+            return
+        }
+        voiceControlSettings = when (action) {
+            VoiceCommandAction.SEND -> voiceControlSettings.copy(sendCommand = trimmed)
+            VoiceCommandAction.INTERRUPT -> voiceControlSettings.copy(interruptCommand = trimmed)
+            VoiceCommandAction.CLEAR -> voiceControlSettings.copy(clearCommand = trimmed)
+        }
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun resetVoiceCommandsToDefaults() {
+        voiceControlSettings = voiceControlSettings.copy(
+            sendCommand = DEFAULT_SEND_COMMAND,
+            interruptCommand = DEFAULT_INTERRUPT_COMMAND,
+            clearCommand = DEFAULT_CLEAR_COMMAND
+        )
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
     }
 
     fun dismissBlockingError() {
