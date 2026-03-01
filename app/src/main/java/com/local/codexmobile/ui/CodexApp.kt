@@ -3,7 +3,11 @@ package com.local.codexmobile.ui
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -54,10 +58,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -190,12 +196,25 @@ private fun SetupScreen(viewModel: CodexViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatScreen(viewModel: CodexViewModel) {
+    val context = LocalContext.current
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var inputText by remember { mutableStateOf("") }
     var isListeningForMessage by remember { mutableStateOf(false) }
     var voiceInputStatus by remember { mutableStateOf<String?>(null) }
+    var isSpeakingResponse by remember { mutableStateOf(false) }
+    var ttsReady by remember { mutableStateOf(false) }
+    var ttsPendingCount by remember { mutableStateOf(0) }
+    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
+    var previousThinkingForTts by remember { mutableStateOf(viewModel.isThinking) }
+    var narrateCurrentTurn by remember { mutableStateOf(false) }
+    var narratedAssistantLength by remember { mutableStateOf(0) }
+    var pendingSpeechBuffer by remember { mutableStateOf("") }
     var pendingAutoListen by remember { mutableStateOf(false) }
     var previousThinking by remember { mutableStateOf(viewModel.isThinking) }
     val messageListState = rememberLazyListState()
+    val shouldNarrateResponses =
+        viewModel.voiceControlSettings.enabled && viewModel.voiceControlSettings.readResponsesAloud
+    val latestAssistantText = viewModel.messages.lastOrNull { it.role == ChatRole.ASSISTANT }?.text
 
     fun applyDraftValue(newValue: String) {
         val command = parseVoiceCommandFromDraft(newValue, viewModel.voiceControlSettings)
@@ -229,6 +248,100 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         }
     }
 
+    fun enqueueResponseSpeech(text: String) {
+        val chunk = text.trim()
+        if (chunk.isEmpty() || !shouldNarrateResponses || !ttsReady) {
+            return
+        }
+        val engine = ttsEngine ?: return
+        val result = engine.speak(
+            chunk,
+            TextToSpeech.QUEUE_ADD,
+            null,
+            "assistant_${System.nanoTime()}"
+        )
+        if (result == TextToSpeech.SUCCESS) {
+            ttsPendingCount += 1
+            isSpeakingResponse = true
+        }
+    }
+
+    fun flushSpeechBuffer(finalFlush: Boolean) {
+        while (true) {
+            val chunkEnd = findNarrationChunkEnd(pendingSpeechBuffer)
+            if (chunkEnd <= 0) {
+                break
+            }
+            val chunk = pendingSpeechBuffer.substring(0, chunkEnd).trim()
+            pendingSpeechBuffer = pendingSpeechBuffer.substring(chunkEnd)
+            enqueueResponseSpeech(chunk)
+        }
+        if (finalFlush) {
+            val finalChunk = pendingSpeechBuffer.trim()
+            pendingSpeechBuffer = ""
+            enqueueResponseSpeech(finalChunk)
+        }
+    }
+
+    DisposableEffect(context) {
+        var createdEngine: TextToSpeech? = null
+        val initListener = TextToSpeech.OnInitListener { status ->
+            mainHandler.post {
+                val engine = createdEngine ?: return@post
+                if (status == TextToSpeech.SUCCESS) {
+                    ttsReady = true
+                    val languageStatus = engine.setLanguage(Locale.getDefault())
+                    if (
+                        languageStatus == TextToSpeech.LANG_MISSING_DATA ||
+                        languageStatus == TextToSpeech.LANG_NOT_SUPPORTED
+                    ) {
+                        engine.setLanguage(Locale.US)
+                    }
+                } else {
+                    ttsReady = false
+                }
+            }
+        }
+        val engine = TextToSpeech(context.applicationContext, initListener)
+        createdEngine = engine
+
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                mainHandler.post {
+                    isSpeakingResponse = true
+                }
+            }
+
+            override fun onDone(utteranceId: String?) {
+                mainHandler.post {
+                    ttsPendingCount = (ttsPendingCount - 1).coerceAtLeast(0)
+                    if (ttsPendingCount == 0) {
+                        isSpeakingResponse = false
+                    }
+                }
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                onDone(utteranceId)
+            }
+        })
+
+        ttsEngine = engine
+
+        onDispose {
+            engine.stop()
+            engine.shutdown()
+            ttsEngine = null
+            ttsReady = false
+            ttsPendingCount = 0
+            isSpeakingResponse = false
+            narrateCurrentTurn = false
+            narratedAssistantLength = 0
+            pendingSpeechBuffer = ""
+        }
+    }
+
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -248,7 +361,13 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     }
 
     fun startVoiceInput(auto: Boolean) {
-        if (!viewModel.voiceControlSettings.enabled || !viewModel.isConnected || viewModel.isThinking || isListeningForMessage) {
+        if (
+            !viewModel.voiceControlSettings.enabled ||
+            !viewModel.isConnected ||
+            viewModel.isThinking ||
+            isListeningForMessage ||
+            (shouldNarrateResponses && isSpeakingResponse)
+        ) {
             return
         }
         isListeningForMessage = true
@@ -274,6 +393,81 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     LaunchedEffect(viewModel.messages.size) {
         if (viewModel.messages.isNotEmpty()) {
             messageListState.animateScrollToItem(viewModel.messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(shouldNarrateResponses) {
+        if (!shouldNarrateResponses) {
+            ttsEngine?.stop()
+            ttsPendingCount = 0
+            isSpeakingResponse = false
+            narrateCurrentTurn = false
+            narratedAssistantLength = latestAssistantText?.length ?: 0
+            pendingSpeechBuffer = ""
+        }
+    }
+
+    LaunchedEffect(viewModel.isThinking, shouldNarrateResponses, latestAssistantText) {
+        if (!shouldNarrateResponses) {
+            previousThinkingForTts = viewModel.isThinking
+            return@LaunchedEffect
+        }
+
+        if (!previousThinkingForTts && viewModel.isThinking) {
+            narrateCurrentTurn = true
+            narratedAssistantLength = latestAssistantText?.length ?: 0
+            pendingSpeechBuffer = ""
+            ttsEngine?.stop()
+            ttsPendingCount = 0
+            isSpeakingResponse = false
+        }
+
+        previousThinkingForTts = viewModel.isThinking
+    }
+
+    LaunchedEffect(
+        latestAssistantText,
+        narrateCurrentTurn,
+        shouldNarrateResponses,
+        viewModel.isThinking,
+        ttsReady
+    ) {
+        if (!shouldNarrateResponses || !narrateCurrentTurn || !ttsReady) {
+            return@LaunchedEffect
+        }
+
+        val text = latestAssistantText.orEmpty()
+        if (text.length < narratedAssistantLength) {
+            narratedAssistantLength = 0
+            pendingSpeechBuffer = ""
+        }
+        if (text.length > narratedAssistantLength) {
+            val delta = text.substring(narratedAssistantLength)
+            pendingSpeechBuffer += delta
+            narratedAssistantLength = text.length
+        }
+
+        flushSpeechBuffer(finalFlush = !viewModel.isThinking)
+        if (!viewModel.isThinking && pendingSpeechBuffer.isBlank() && ttsPendingCount == 0) {
+            narrateCurrentTurn = false
+        }
+    }
+
+    LaunchedEffect(
+        ttsPendingCount,
+        viewModel.isThinking,
+        pendingSpeechBuffer,
+        narrateCurrentTurn,
+        shouldNarrateResponses
+    ) {
+        if (
+            shouldNarrateResponses &&
+            narrateCurrentTurn &&
+            !viewModel.isThinking &&
+            pendingSpeechBuffer.isBlank() &&
+            ttsPendingCount == 0
+        ) {
+            narrateCurrentTurn = false
         }
     }
 
@@ -305,14 +499,17 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         viewModel.voiceControlSettings.enabled,
         viewModel.isConnected,
         viewModel.isThinking,
-        isListeningForMessage
+        isListeningForMessage,
+        shouldNarrateResponses,
+        isSpeakingResponse
     ) {
         if (
             pendingAutoListen &&
             viewModel.voiceControlSettings.enabled &&
             viewModel.isConnected &&
             !viewModel.isThinking &&
-            !isListeningForMessage
+            !isListeningForMessage &&
+            (!shouldNarrateResponses || !isSpeakingResponse)
         ) {
             pendingAutoListen = false
             startVoiceInput(auto = true)
@@ -484,6 +681,30 @@ private fun VoiceSettingsScreen(viewModel: CodexViewModel) {
                     Switch(
                         checked = settings.enabled,
                         onCheckedChange = viewModel::setVoiceControlEnabled
+                    )
+                }
+            }
+
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0x221E2A2C))) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Read model responses aloud", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Uses Android text-to-speech while voice control is enabled.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.LightGray
+                        )
+                    }
+                    Switch(
+                        checked = settings.readResponsesAloud,
+                        onCheckedChange = viewModel::setReadResponsesAloud,
+                        enabled = settings.enabled
                     )
                 }
             }
@@ -839,6 +1060,32 @@ private fun InputSection(
             }
         }
     }
+}
+
+private fun findNarrationChunkEnd(buffer: String): Int {
+    if (buffer.isBlank()) {
+        return -1
+    }
+
+    for (index in buffer.indices) {
+        val c = buffer[index]
+        if (c == '\n') {
+            return index + 1
+        }
+        if ((c == '.' || c == '!' || c == '?') && index + 1 < buffer.length && buffer[index + 1].isWhitespace()) {
+            return index + 1
+        }
+    }
+
+    if (buffer.length >= 140) {
+        val searchEnd = minOf(buffer.length - 1, 180)
+        val splitAt = buffer.lastIndexOf(' ', startIndex = searchEnd)
+        if (splitAt > 20) {
+            return splitAt + 1
+        }
+    }
+
+    return -1
 }
 
 private data class VoiceCommandMatch(

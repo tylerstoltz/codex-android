@@ -281,6 +281,11 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         serverStore.saveVoiceControlSettings(voiceControlSettings)
     }
 
+    fun setReadResponsesAloud(enabled: Boolean) {
+        voiceControlSettings = voiceControlSettings.copy(readResponsesAloud = enabled)
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
     fun updateVoiceCommand(action: VoiceCommandAction, phrase: String) {
         val trimmed = phrase.trim()
         if (trimmed.isEmpty()) {

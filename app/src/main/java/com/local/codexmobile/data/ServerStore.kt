@@ -51,6 +51,7 @@ class ServerStore(context: Context) {
     fun loadVoiceControlSettings(): VoiceControlSettings {
         return VoiceControlSettings(
             enabled = prefs.getBoolean(KEY_VOICE_CONTROL_ENABLED, false),
+            readResponsesAloud = prefs.getBoolean(KEY_VOICE_READ_RESPONSES_ALOUD, false),
             sendCommand = prefs.getString(KEY_VOICE_COMMAND_SEND, DEFAULT_SEND_COMMAND)
                 .orEmpty()
                 .ifBlank { DEFAULT_SEND_COMMAND },
@@ -66,6 +67,7 @@ class ServerStore(context: Context) {
     fun saveVoiceControlSettings(settings: VoiceControlSettings) {
         prefs.edit()
             .putBoolean(KEY_VOICE_CONTROL_ENABLED, settings.enabled)
+            .putBoolean(KEY_VOICE_READ_RESPONSES_ALOUD, settings.readResponsesAloud)
             .putString(KEY_VOICE_COMMAND_SEND, settings.sendCommand.trim().ifBlank { DEFAULT_SEND_COMMAND })
             .putString(
                 KEY_VOICE_COMMAND_INTERRUPT,
@@ -79,6 +81,7 @@ class ServerStore(context: Context) {
         private const val KEY_SERVERS = "servers"
         private const val KEY_RECENT_CWDS = "recent_cwds"
         private const val KEY_VOICE_CONTROL_ENABLED = "voice_control_enabled"
+        private const val KEY_VOICE_READ_RESPONSES_ALOUD = "voice_read_responses_aloud"
         private const val KEY_VOICE_COMMAND_SEND = "voice_command_send"
         private const val KEY_VOICE_COMMAND_INTERRUPT = "voice_command_interrupt"
         private const val KEY_VOICE_COMMAND_CLEAR = "voice_command_clear"

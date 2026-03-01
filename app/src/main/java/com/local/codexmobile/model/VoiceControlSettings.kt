@@ -2,6 +2,7 @@ package com.local.codexmobile.model
 
 data class VoiceControlSettings(
     val enabled: Boolean = false,
+    val readResponsesAloud: Boolean = false,
     val sendCommand: String = DEFAULT_SEND_COMMAND,
     val interruptCommand: String = DEFAULT_INTERRUPT_COMMAND,
     val clearCommand: String = DEFAULT_CLEAR_COMMAND
