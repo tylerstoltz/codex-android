@@ -298,6 +298,16 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         serverStore.saveVoiceControlSettings(voiceControlSettings)
     }
 
+    fun setAutoSendAfterRecognition(enabled: Boolean) {
+        voiceControlSettings = voiceControlSettings.copy(autoSendAfterRecognition = enabled)
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun setAutoSendGracePeriodMs(gracePeriodMs: Long) {
+        voiceControlSettings = voiceControlSettings.copy(autoSendGracePeriodMs = gracePeriodMs.coerceIn(0L, 3_000L))
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
     fun updateVoiceCommand(action: VoiceCommandAction, phrase: String) {
         val trimmed = phrase.trim()
         if (trimmed.isEmpty()) {

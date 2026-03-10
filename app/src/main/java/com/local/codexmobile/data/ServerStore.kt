@@ -2,6 +2,7 @@ package com.local.codexmobile.data
 
 import android.content.Context
 import com.local.codexmobile.model.DEFAULT_CLEAR_COMMAND
+import com.local.codexmobile.model.DEFAULT_AUTO_SEND_GRACE_PERIOD_MS
 import com.local.codexmobile.model.DEFAULT_INTERRUPT_COMMAND
 import com.local.codexmobile.model.DEFAULT_SEND_COMMAND
 import com.local.codexmobile.model.ServerConfig
@@ -52,6 +53,11 @@ class ServerStore(context: Context) {
         return VoiceControlSettings(
             enabled = prefs.getBoolean(KEY_VOICE_CONTROL_ENABLED, false),
             readResponsesAloud = prefs.getBoolean(KEY_VOICE_READ_RESPONSES_ALOUD, false),
+            autoSendAfterRecognition = prefs.getBoolean(KEY_VOICE_AUTO_SEND_AFTER_RECOGNITION, true),
+            autoSendGracePeriodMs = prefs.getLong(
+                KEY_VOICE_AUTO_SEND_GRACE_PERIOD_MS,
+                DEFAULT_AUTO_SEND_GRACE_PERIOD_MS
+            ).coerceIn(0L, 3_000L),
             sendCommand = prefs.getString(KEY_VOICE_COMMAND_SEND, DEFAULT_SEND_COMMAND)
                 .orEmpty()
                 .ifBlank { DEFAULT_SEND_COMMAND },
@@ -68,6 +74,11 @@ class ServerStore(context: Context) {
         prefs.edit()
             .putBoolean(KEY_VOICE_CONTROL_ENABLED, settings.enabled)
             .putBoolean(KEY_VOICE_READ_RESPONSES_ALOUD, settings.readResponsesAloud)
+            .putBoolean(KEY_VOICE_AUTO_SEND_AFTER_RECOGNITION, settings.autoSendAfterRecognition)
+            .putLong(
+                KEY_VOICE_AUTO_SEND_GRACE_PERIOD_MS,
+                settings.autoSendGracePeriodMs.coerceIn(0L, 3_000L)
+            )
             .putString(KEY_VOICE_COMMAND_SEND, settings.sendCommand.trim().ifBlank { DEFAULT_SEND_COMMAND })
             .putString(
                 KEY_VOICE_COMMAND_INTERRUPT,
@@ -82,6 +93,8 @@ class ServerStore(context: Context) {
         private const val KEY_RECENT_CWDS = "recent_cwds"
         private const val KEY_VOICE_CONTROL_ENABLED = "voice_control_enabled"
         private const val KEY_VOICE_READ_RESPONSES_ALOUD = "voice_read_responses_aloud"
+        private const val KEY_VOICE_AUTO_SEND_AFTER_RECOGNITION = "voice_auto_send_after_recognition"
+        private const val KEY_VOICE_AUTO_SEND_GRACE_PERIOD_MS = "voice_auto_send_grace_period_ms"
         private const val KEY_VOICE_COMMAND_SEND = "voice_command_send"
         private const val KEY_VOICE_COMMAND_INTERRUPT = "voice_command_interrupt"
         private const val KEY_VOICE_COMMAND_CLEAR = "voice_command_clear"

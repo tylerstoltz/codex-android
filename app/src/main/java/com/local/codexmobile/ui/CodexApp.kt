@@ -5,9 +5,11 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -77,6 +79,7 @@ import com.local.codexmobile.model.ServerConfig
 import com.local.codexmobile.model.ThreadSummary
 import com.local.codexmobile.model.VoiceCommandAction
 import com.local.codexmobile.model.VoiceControlSettings
+import kotlinx.coroutines.delay
 import com.local.codexmobile.ui.theme.CodexAssistantBubble
 import com.local.codexmobile.ui.theme.CodexBg
 import com.local.codexmobile.ui.theme.CodexGreen
@@ -210,14 +213,109 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     var narratedAssistantLength by remember { mutableStateOf(0) }
     var pendingSpeechBuffer by remember { mutableStateOf("") }
     var pendingMessageAutoListen by remember { mutableStateOf(false) }
-    var pendingInterruptAutoListen by remember { mutableStateOf(false) }
+    var pendingAutoSendDraft by remember { mutableStateOf<String?>(null) }
+    var pendingAutoSendDeadlineMs by remember { mutableStateOf<Long?>(null) }
+    var autoSendStatus by remember { mutableStateOf<String?>(null) }
     var previousThinking by remember { mutableStateOf(viewModel.isThinking) }
     val messageListState = rememberLazyListState()
     val shouldNarrateResponses =
         viewModel.voiceControlSettings.enabled && viewModel.voiceControlSettings.readResponsesAloud
     val latestAssistantText = viewModel.messages.lastOrNull { it.role == ChatRole.ASSISTANT }?.text
 
+    fun clearPendingAutoSend(status: String? = autoSendStatus) {
+        if (pendingAutoSendDraft != null) {
+            Log.d(VOICE_LOG_TAG, "Auto-send canceled: ${status ?: "cleared"}")
+        }
+        pendingAutoSendDraft = null
+        pendingAutoSendDeadlineMs = null
+        autoSendStatus = status
+    }
+
+    fun sendDraftImmediately(text: String, reason: String) {
+        val trimmed = text.trim()
+        clearPendingAutoSend(status = null)
+        if (trimmed.isEmpty()) {
+            inputText = ""
+            return
+        }
+
+        if (viewModel.isConnected && !viewModel.isThinking) {
+            Log.d(VOICE_LOG_TAG, "Sending draft ($reason, ${trimmed.length} chars)")
+            viewModel.sendMessage(trimmed)
+            inputText = ""
+            autoSendStatus = null
+        } else {
+            inputText = trimmed
+            autoSendStatus = "Auto-send unavailable right now."
+        }
+    }
+
+    fun scheduleAutoSend(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) {
+            clearPendingAutoSend(status = null)
+            inputText = ""
+            return
+        }
+
+        val gracePeriodMs = viewModel.voiceControlSettings.autoSendGracePeriodMs.coerceAtLeast(0L)
+        pendingAutoSendDraft = trimmed
+        pendingAutoSendDeadlineMs = SystemClock.elapsedRealtime() + gracePeriodMs
+        autoSendStatus = formatAutoSendCountdown(gracePeriodMs)
+        Log.d(
+            VOICE_LOG_TAG,
+            "Auto-send scheduled after recognition (${trimmed.length} chars, ${gracePeriodMs}ms grace)"
+        )
+    }
+
+    fun handleRecognizedMessage(spokenText: String) {
+        val command = parseVoiceCommandFromDraft(spokenText, viewModel.voiceControlSettings)
+        if (command != null) {
+            when (command.action) {
+                VoiceCommandAction.SEND -> {
+                    sendDraftImmediately(command.payload, reason = "explicit voice send")
+                }
+
+                VoiceCommandAction.INTERRUPT -> {
+                    clearPendingAutoSend(status = null)
+                    inputText = ""
+                    if (viewModel.isConnected && viewModel.isThinking) {
+                        viewModel.interruptTurn()
+                    }
+                }
+
+                VoiceCommandAction.CLEAR -> {
+                    clearPendingAutoSend(status = "Draft cleared.")
+                    inputText = ""
+                }
+            }
+            return
+        }
+
+        inputText = spokenText
+        if (viewModel.voiceControlSettings.autoSendAfterRecognition) {
+            scheduleAutoSend(spokenText)
+        } else {
+            clearPendingAutoSend(status = "Transcript added to composer.")
+        }
+    }
+
+    fun stopAssistantSpeechForVoiceInput() {
+        if (!shouldNarrateResponses || !isSpeakingResponse) {
+            return
+        }
+        Log.d(VOICE_LOG_TAG, "Stopping TTS so voice capture can resume")
+        ttsEngine?.stop()
+        ttsPendingCount = 0
+        isSpeakingResponse = false
+        narrateCurrentTurn = false
+        pendingSpeechBuffer = ""
+    }
+
     fun applyDraftValue(newValue: String) {
+        if (pendingAutoSendDraft != null && newValue.trim() != pendingAutoSendDraft?.trim()) {
+            clearPendingAutoSend(status = "Auto-send canceled.")
+        }
         val command = parseVoiceCommandFromDraft(newValue, viewModel.voiceControlSettings)
         if (command == null) {
             inputText = newValue
@@ -227,16 +325,17 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         when (command.action) {
             VoiceCommandAction.SEND -> {
                 if (command.payload.isBlank()) {
+                    clearPendingAutoSend(status = null)
                     inputText = ""
                 } else if (viewModel.isConnected && !viewModel.isThinking) {
-                    viewModel.sendMessage(command.payload)
-                    inputText = ""
+                    sendDraftImmediately(command.payload, reason = "manual voice command")
                 } else {
                     inputText = command.payload
                 }
             }
 
             VoiceCommandAction.INTERRUPT -> {
+                clearPendingAutoSend(status = null)
                 if (viewModel.isConnected && viewModel.isThinking) {
                     viewModel.interruptTurn()
                 }
@@ -244,6 +343,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             }
 
             VoiceCommandAction.CLEAR -> {
+                clearPendingAutoSend(status = "Draft cleared.")
                 inputText = ""
             }
         }
@@ -362,7 +462,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             when (captureMode) {
                 VoiceCaptureMode.MESSAGE -> {
                     voiceInputStatus = null
-                    applyDraftValue(spokenText)
+                    handleRecognizedMessage(spokenText)
                 }
 
                 VoiceCaptureMode.INTERRUPT -> {
@@ -372,9 +472,6 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                         viewModel.interruptTurn()
                     } else {
                         voiceInputStatus = "Interrupt phrase not recognized."
-                        if (viewModel.isThinking && viewModel.activeTurnId != null) {
-                            pendingInterruptAutoListen = true
-                        }
                     }
                 }
             }
@@ -384,9 +481,6 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             } else {
                 "No speech captured."
             }
-            if (captureMode == VoiceCaptureMode.INTERRUPT && viewModel.isThinking && viewModel.activeTurnId != null) {
-                pendingInterruptAutoListen = true
-            }
         }
     }
 
@@ -394,8 +488,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         if (
             !viewModel.voiceControlSettings.enabled ||
             !viewModel.isConnected ||
-            activeVoiceCaptureMode != null ||
-            (shouldNarrateResponses && isSpeakingResponse)
+            activeVoiceCaptureMode != null
         ) {
             return
         }
@@ -404,6 +497,11 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         }
         if (mode == VoiceCaptureMode.INTERRUPT && (!viewModel.isThinking || viewModel.activeTurnId == null)) {
             return
+        }
+        if (mode == VoiceCaptureMode.MESSAGE) {
+            pendingMessageAutoListen = false
+            clearPendingAutoSend(status = null)
+            stopAssistantSpeechForVoiceInput()
         }
         activeVoiceCaptureMode = mode
         voiceInputStatus = when (mode) {
@@ -449,6 +547,34 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             narrateCurrentTurn = false
             narratedAssistantLength = latestAssistantText?.length ?: 0
             pendingSpeechBuffer = ""
+        }
+    }
+
+    LaunchedEffect(
+        pendingAutoSendDraft,
+        pendingAutoSendDeadlineMs,
+        viewModel.isConnected,
+        viewModel.isThinking
+    ) {
+        val pendingDraft = pendingAutoSendDraft ?: return@LaunchedEffect
+        val deadlineMs = pendingAutoSendDeadlineMs ?: return@LaunchedEffect
+        while (pendingAutoSendDraft == pendingDraft && pendingAutoSendDeadlineMs == deadlineMs) {
+            if (!viewModel.isConnected) {
+                clearPendingAutoSend(status = "Auto-send canceled: disconnected.")
+                return@LaunchedEffect
+            }
+            if (viewModel.isThinking) {
+                clearPendingAutoSend(status = null)
+                return@LaunchedEffect
+            }
+
+            val remainingMs = (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+            autoSendStatus = formatAutoSendCountdown(remainingMs)
+            if (remainingMs == 0L) {
+                sendDraftImmediately(pendingDraft, reason = "post-recognition grace elapsed")
+                return@LaunchedEffect
+            }
+            delay(minOf(100L, remainingMs))
         }
     }
 
@@ -519,7 +645,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     LaunchedEffect(viewModel.voiceControlSettings.enabled) {
         if (!viewModel.voiceControlSettings.enabled) {
             pendingMessageAutoListen = false
-            pendingInterruptAutoListen = false
+            clearPendingAutoSend(status = null)
             voiceInputStatus = null
             return@LaunchedEffect
         }
@@ -528,15 +654,20 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         }
     }
 
+    LaunchedEffect(
+        viewModel.voiceControlSettings.enabled,
+        viewModel.voiceControlSettings.autoSendAfterRecognition
+    ) {
+        if (!viewModel.voiceControlSettings.enabled || !viewModel.voiceControlSettings.autoSendAfterRecognition) {
+            clearPendingAutoSend(status = null)
+        }
+    }
+
     LaunchedEffect(viewModel.isThinking, viewModel.activeTurnId, viewModel.voiceControlSettings.enabled) {
         if (!viewModel.voiceControlSettings.enabled) {
             previousThinking = viewModel.isThinking
             pendingMessageAutoListen = false
-            pendingInterruptAutoListen = false
             return@LaunchedEffect
-        }
-        if (viewModel.isThinking && viewModel.activeTurnId != null) {
-            pendingInterruptAutoListen = true
         }
         if (previousThinking && !viewModel.isThinking) {
             pendingMessageAutoListen = true
@@ -563,30 +694,6 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         ) {
             pendingMessageAutoListen = false
             startVoiceInput(auto = true, mode = VoiceCaptureMode.MESSAGE)
-        }
-    }
-
-    LaunchedEffect(
-        pendingInterruptAutoListen,
-        viewModel.voiceControlSettings.enabled,
-        viewModel.isConnected,
-        viewModel.isThinking,
-        viewModel.activeTurnId,
-        activeVoiceCaptureMode,
-        shouldNarrateResponses,
-        isSpeakingResponse
-    ) {
-        if (
-            pendingInterruptAutoListen &&
-            viewModel.voiceControlSettings.enabled &&
-            viewModel.isConnected &&
-            viewModel.isThinking &&
-            viewModel.activeTurnId != null &&
-            activeVoiceCaptureMode == null &&
-            (!shouldNarrateResponses || !isSpeakingResponse)
-        ) {
-            pendingInterruptAutoListen = false
-            startVoiceInput(auto = true, mode = VoiceCaptureMode.INTERRUPT)
         }
     }
 
@@ -651,8 +758,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                     value = inputText,
                     onValueChange = ::applyDraftValue,
                     onSend = {
-                        viewModel.sendMessage(inputText)
-                        inputText = ""
+                        sendDraftImmediately(inputText, reason = "manual send button")
                     },
                     onInterrupt = viewModel::interruptTurn,
                     onStartVoiceInput = { startVoiceInput(auto = false, mode = VoiceCaptureMode.MESSAGE) },
@@ -661,7 +767,8 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                     enabled = viewModel.isConnected,
                     voiceControlSettings = viewModel.voiceControlSettings,
                     isListeningForVoiceInput = activeVoiceCaptureMode != null,
-                    voiceInputStatus = voiceInputStatus
+                    voiceInputStatus = voiceInputStatus,
+                    autoSendStatus = autoSendStatus
                 )
             }
         }
@@ -748,7 +855,7 @@ private fun VoiceSettingsScreen(viewModel: CodexViewModel) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Enable voice control", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "Run Send, Interrupt, and Clear hands-free from dictated text.",
+                            "Auto-listen for turns and keep spoken commands as fallbacks.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.LightGray
                         )
@@ -784,6 +891,63 @@ private fun VoiceSettingsScreen(viewModel: CodexViewModel) {
                 }
             }
 
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0x221E2A2C))) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Auto-send recognized speech", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "After speech recognition finishes, queue the message to send automatically.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.LightGray
+                        )
+                    }
+                    Switch(
+                        checked = settings.autoSendAfterRecognition,
+                        onCheckedChange = viewModel::setAutoSendAfterRecognition,
+                        enabled = settings.enabled
+                    )
+                }
+            }
+
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0x221E2A2C))) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Auto-send grace period", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Keeps the recognized transcript visible briefly before it is sent.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.LightGray
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(500L, 800L, 1200L).forEach { graceMs ->
+                            AssistChip(
+                                onClick = { viewModel.setAutoSendGracePeriodMs(graceMs) },
+                                enabled = settings.enabled && settings.autoSendAfterRecognition,
+                                label = { Text(formatGracePeriodLabel(graceMs)) },
+                                colors = if (settings.autoSendGracePeriodMs == graceMs) {
+                                    AssistChipDefaults.assistChipColors(
+                                        containerColor = Color(0x3324C29A),
+                                        labelColor = Color.White
+                                    )
+                                } else {
+                                    AssistChipDefaults.assistChipColors()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
             if (captureTarget != null) {
                 Text("Listening for command phrase...", color = CodexGreen)
             }
@@ -793,7 +957,7 @@ private fun VoiceSettingsScreen(viewModel: CodexViewModel) {
 
             VoiceCommandRow(
                 title = "Send command",
-                description = "Spoken phrase that sends the current draft.",
+                description = "Fallback spoken phrase that sends immediately.",
                 phrase = settings.sendCommand,
                 onRecord = {
                     recordVoiceCommand(
@@ -1084,7 +1248,8 @@ private fun InputSection(
     enabled: Boolean,
     voiceControlSettings: VoiceControlSettings,
     isListeningForVoiceInput: Boolean,
-    voiceInputStatus: String?
+    voiceInputStatus: String?,
+    autoSendStatus: String?
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (voiceControlSettings.enabled) {
@@ -1096,6 +1261,13 @@ private fun InputSection(
                 color = Color.LightGray
             )
             voiceInputStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.LightGray
+                )
+            }
+            autoSendStatus?.let { status ->
                 Text(
                     text = status,
                     style = MaterialTheme.typography.labelSmall,
@@ -1261,3 +1433,16 @@ private fun suffixStart(tokens: List<DraftToken>, commandWords: List<String>): I
     }
     return start
 }
+
+private fun formatAutoSendCountdown(remainingMs: Long): String {
+    if (remainingMs <= 0L) {
+        return "Sending..."
+    }
+    return "Sending in %.1fs".format(Locale.US, remainingMs / 1000.0)
+}
+
+private fun formatGracePeriodLabel(graceMs: Long): String {
+    return "%.1fs".format(Locale.US, graceMs / 1000.0)
+}
+
+private const val VOICE_LOG_TAG = "CodexVoice"
