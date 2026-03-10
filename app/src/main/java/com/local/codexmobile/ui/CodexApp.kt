@@ -13,19 +13,27 @@ import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -66,11 +74,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.local.codexmobile.model.ChatMessage
@@ -129,6 +142,7 @@ private fun SetupScreen(viewModel: CodexViewModel) {
                             style = MaterialTheme.typography.labelSmall,
                             color = if (viewModel.isConnected) CodexGreen else Color.LightGray
                         )
+                        AdaptivePathText(path = viewModel.activeCwd)
                     }
                 },
                 actions = {
@@ -196,10 +210,11 @@ private fun SetupScreen(viewModel: CodexViewModel) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ChatScreen(viewModel: CodexViewModel) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var inputText by remember { mutableStateOf("") }
     var activeVoiceCaptureMode by remember { mutableStateOf<VoiceCaptureMode?>(null) }
@@ -219,6 +234,8 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     var autoSendStatus by remember { mutableStateOf<String?>(null) }
     var previousThinking by remember { mutableStateOf(viewModel.isThinking) }
     val messageListState = rememberLazyListState()
+    val bottomAnchorRequester = remember { BringIntoViewRequester() }
+    val imeBottom = WindowInsets.ime.getBottom(density)
     val shouldNarrateResponses =
         viewModel.voiceControlSettings.enabled && viewModel.voiceControlSettings.readResponsesAloud
     val latestAssistantText = viewModel.messages.lastOrNull { it.role == ChatRole.ASSISTANT }?.text
@@ -536,9 +553,10 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         }
     }
 
-    LaunchedEffect(viewModel.messages.size) {
+    LaunchedEffect(viewModel.messages.size, latestAssistantText, imeBottom) {
         if (viewModel.messages.isNotEmpty()) {
-            messageListState.animateScrollToItem(viewModel.messages.lastIndex)
+            bottomAnchorRequester.bringIntoView()
+            messageListState.animateScrollBy(Float.MAX_VALUE)
         }
     }
 
@@ -835,6 +853,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                             style = MaterialTheme.typography.labelSmall,
                             color = if (viewModel.isConnected) CodexGreen else Color.LightGray
                         )
+                        AdaptivePathText(path = viewModel.activeCwd)
                     }
                 },
                 actions = {
@@ -876,6 +895,13 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             ) {
                 items(viewModel.messages) { message ->
                     MessageBubble(message = message)
+                }
+                item {
+                    Spacer(
+                        modifier = Modifier
+                            .height(1.dp)
+                            .bringIntoViewRequester(bottomAnchorRequester)
+                    )
                 }
             }
 
@@ -1312,16 +1338,23 @@ private fun SessionSection(
             if (threads.isEmpty()) {
                 Text("No threads loaded yet", color = Color.LightGray)
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     threads.take(8).forEach { thread ->
                         AssistChip(
+                            modifier = Modifier.fillMaxWidth(),
                             onClick = { onResume(thread) },
                             label = {
-                                Text(
-                                    if (thread.preview.isBlank()) thread.id else thread.preview,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                    AdaptivePathText(
+                                        path = thread.cwd,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Text(
+                                        text = if (thread.preview.isBlank()) thread.id else thread.preview,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         )
                     }
@@ -1360,6 +1393,80 @@ private fun stripMarkdown(text: String): String {
         .replace("```", "")                         // closing code fences
         .replace(Regex("`([^`]+)`"), "$1")          // inline code
         .replace(Regex("\\*\\*([^*]+)\\*\\*"), "$1") // bold
+}
+
+@Composable
+private fun AdaptivePathText(
+    path: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.LightGray
+) {
+    val textStyle = MaterialTheme.typography.labelSmall
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    BoxWithConstraints(modifier = modifier) {
+        val maxWidthPx = with(density) { maxWidth.roundToPx() }
+        Text(
+            text = fitPathToWidth(
+                path = path,
+                maxWidthPx = maxWidthPx,
+                style = textStyle,
+                textMeasurer = textMeasurer
+            ),
+            style = textStyle,
+            color = color,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
+        )
+    }
+}
+
+private fun fitPathToWidth(
+    path: String,
+    maxWidthPx: Int,
+    style: TextStyle,
+    textMeasurer: androidx.compose.ui.text.TextMeasurer
+): String {
+    val trimmed = path.trim()
+    if (trimmed.isEmpty() || maxWidthPx <= 0) {
+        return trimmed
+    }
+    if (fitsInWidth(trimmed, maxWidthPx, style, textMeasurer)) {
+        return trimmed
+    }
+
+    var low = 1
+    var high = trimmed.length
+    var best = "..."
+    while (low <= high) {
+        val mid = (low + high) / 2
+        val candidate = "..." + trimmed.takeLast(mid)
+        if (fitsInWidth(candidate, maxWidthPx, style, textMeasurer)) {
+            best = candidate
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    return best
+}
+
+private fun fitsInWidth(
+    text: String,
+    maxWidthPx: Int,
+    style: TextStyle,
+    textMeasurer: androidx.compose.ui.text.TextMeasurer
+): Boolean {
+    val result = textMeasurer.measure(
+        text = AnnotatedString(text),
+        style = style,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Clip,
+        constraints = Constraints(maxWidth = maxWidthPx)
+    )
+    return result.lineCount <= 1 && result.hasVisualOverflow.not()
 }
 
 @Composable
