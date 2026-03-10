@@ -212,6 +212,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     var narrateCurrentTurn by remember { mutableStateOf(false) }
     var narratedAssistantLength by remember { mutableStateOf(0) }
     var pendingSpeechBuffer by remember { mutableStateOf("") }
+    var lastAssistantUpdateElapsedMs by remember { mutableStateOf<Long?>(null) }
     var pendingMessageAutoListen by remember { mutableStateOf(false) }
     var pendingAutoSendDraft by remember { mutableStateOf<String?>(null) }
     var pendingAutoSendDeadlineMs by remember { mutableStateOf<Long?>(null) }
@@ -310,6 +311,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         isSpeakingResponse = false
         narrateCurrentTurn = false
         pendingSpeechBuffer = ""
+        lastAssistantUpdateElapsedMs = null
     }
 
     fun applyDraftValue(newValue: String) {
@@ -440,6 +442,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             narrateCurrentTurn = false
             narratedAssistantLength = 0
             pendingSpeechBuffer = ""
+            lastAssistantUpdateElapsedMs = null
         }
     }
 
@@ -547,6 +550,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             narrateCurrentTurn = false
             narratedAssistantLength = latestAssistantText?.length ?: 0
             pendingSpeechBuffer = ""
+            lastAssistantUpdateElapsedMs = null
         }
     }
 
@@ -585,9 +589,15 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         }
 
         if (!previousThinkingForTts && viewModel.isThinking) {
+            val assistantAlreadyStarted = viewModel.messages.lastOrNull()?.role == ChatRole.ASSISTANT
             narrateCurrentTurn = true
-            narratedAssistantLength = latestAssistantText?.length ?: 0
+            narratedAssistantLength = if (assistantAlreadyStarted) 0 else latestAssistantText?.length ?: 0
             pendingSpeechBuffer = ""
+            lastAssistantUpdateElapsedMs = if (assistantAlreadyStarted) {
+                SystemClock.elapsedRealtime()
+            } else {
+                null
+            }
             ttsEngine?.stop()
             ttsPendingCount = 0
             isSpeakingResponse = false
@@ -611,16 +621,109 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         if (text.length < narratedAssistantLength) {
             narratedAssistantLength = 0
             pendingSpeechBuffer = ""
+            lastAssistantUpdateElapsedMs = null
         }
         if (text.length > narratedAssistantLength) {
             val delta = text.substring(narratedAssistantLength)
             pendingSpeechBuffer += delta
             narratedAssistantLength = text.length
+            lastAssistantUpdateElapsedMs = SystemClock.elapsedRealtime()
         }
 
-        flushSpeechBuffer(finalFlush = !viewModel.isThinking)
-        if (!viewModel.isThinking && pendingSpeechBuffer.isBlank() && ttsPendingCount == 0) {
-            narrateCurrentTurn = false
+        flushSpeechBuffer(finalFlush = false)
+    }
+
+    LaunchedEffect(
+        pendingSpeechBuffer,
+        lastAssistantUpdateElapsedMs,
+        narrateCurrentTurn,
+        shouldNarrateResponses,
+        viewModel.isThinking,
+        ttsReady
+    ) {
+        if (
+            !shouldNarrateResponses ||
+            !narrateCurrentTurn ||
+            !viewModel.isThinking ||
+            !ttsReady ||
+            pendingSpeechBuffer.isBlank()
+        ) {
+            return@LaunchedEffect
+        }
+
+        val lastUpdateMs = lastAssistantUpdateElapsedMs ?: return@LaunchedEffect
+        val bufferSnapshot = pendingSpeechBuffer
+        val remainingMs = (
+            ASSISTANT_SPEECH_IDLE_FLUSH_MS -
+                (SystemClock.elapsedRealtime() - lastUpdateMs)
+            ).coerceAtLeast(0L)
+        if (remainingMs > 0L) {
+            delay(remainingMs)
+        }
+
+        if (
+            shouldNarrateResponses &&
+            narrateCurrentTurn &&
+            viewModel.isThinking &&
+            ttsReady &&
+            pendingSpeechBuffer == bufferSnapshot &&
+            lastAssistantUpdateElapsedMs == lastUpdateMs
+        ) {
+            while (true) {
+                val chunkEnd = findNarrationChunkEnd(pendingSpeechBuffer, allowPartialFlush = true)
+                if (chunkEnd <= 0) {
+                    break
+                }
+                val chunk = pendingSpeechBuffer.substring(0, chunkEnd).trim()
+                pendingSpeechBuffer = pendingSpeechBuffer.substring(chunkEnd)
+                enqueueResponseSpeech(chunk)
+            }
+        }
+    }
+
+    LaunchedEffect(
+        pendingSpeechBuffer,
+        lastAssistantUpdateElapsedMs,
+        narrateCurrentTurn,
+        shouldNarrateResponses,
+        viewModel.isThinking,
+        ttsReady,
+        ttsPendingCount
+    ) {
+        if (
+            !shouldNarrateResponses ||
+            !narrateCurrentTurn ||
+            viewModel.isThinking ||
+            !ttsReady
+        ) {
+            return@LaunchedEffect
+        }
+
+        val lastUpdateMs = lastAssistantUpdateElapsedMs
+        val remainingMs = if (lastUpdateMs == null) {
+            0L
+        } else {
+            (
+                ASSISTANT_TURN_SETTLE_MS -
+                    (SystemClock.elapsedRealtime() - lastUpdateMs)
+                ).coerceAtLeast(0L)
+        }
+        if (remainingMs > 0L) {
+            delay(remainingMs)
+        }
+
+        if (
+            shouldNarrateResponses &&
+            narrateCurrentTurn &&
+            !viewModel.isThinking &&
+            ttsReady &&
+            lastAssistantUpdateElapsedMs == lastUpdateMs
+        ) {
+            flushSpeechBuffer(finalFlush = true)
+            if (pendingSpeechBuffer.isBlank() && ttsPendingCount == 0) {
+                narrateCurrentTurn = false
+                lastAssistantUpdateElapsedMs = null
+            }
         }
     }
 
@@ -629,16 +732,23 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         viewModel.isThinking,
         pendingSpeechBuffer,
         narrateCurrentTurn,
-        shouldNarrateResponses
+        shouldNarrateResponses,
+        lastAssistantUpdateElapsedMs
     ) {
+        val lastUpdateMs = lastAssistantUpdateElapsedMs
         if (
             shouldNarrateResponses &&
             narrateCurrentTurn &&
             !viewModel.isThinking &&
             pendingSpeechBuffer.isBlank() &&
-            ttsPendingCount == 0
+            ttsPendingCount == 0 &&
+            (
+                lastUpdateMs == null ||
+                    SystemClock.elapsedRealtime() - lastUpdateMs >= ASSISTANT_TURN_SETTLE_MS
+                )
         ) {
             narrateCurrentTurn = false
+            lastAssistantUpdateElapsedMs = null
         }
     }
 
@@ -690,7 +800,14 @@ private fun ChatScreen(viewModel: CodexViewModel) {
             viewModel.isConnected &&
             !viewModel.isThinking &&
             activeVoiceCaptureMode == null &&
-            (!shouldNarrateResponses || !isSpeakingResponse)
+            (
+                !shouldNarrateResponses ||
+                    (
+                        !isSpeakingResponse &&
+                            pendingSpeechBuffer.isBlank() &&
+                            !narrateCurrentTurn
+                        )
+                )
         ) {
             pendingMessageAutoListen = false
             startVoiceInput(auto = true, mode = VoiceCaptureMode.MESSAGE)
@@ -1310,7 +1427,7 @@ private fun InputSection(
     }
 }
 
-private fun findNarrationChunkEnd(buffer: String): Int {
+private fun findNarrationChunkEnd(buffer: String, allowPartialFlush: Boolean = false): Int {
     if (buffer.isBlank()) {
         return -1
     }
@@ -1323,10 +1440,21 @@ private fun findNarrationChunkEnd(buffer: String): Int {
         if ((c == '.' || c == '!' || c == '?') && index + 1 < buffer.length && buffer[index + 1].isWhitespace()) {
             return index + 1
         }
+        if ((c == ',' || c == ';' || c == ':') && index > 20 && index + 1 < buffer.length && buffer[index + 1].isWhitespace()) {
+            return index + 1
+        }
     }
 
     if (buffer.length >= 140) {
         val searchEnd = minOf(buffer.length - 1, 180)
+        val splitAt = buffer.lastIndexOf(' ', startIndex = searchEnd)
+        if (splitAt > 20) {
+            return splitAt + 1
+        }
+    }
+
+    if (allowPartialFlush && buffer.length >= 32) {
+        val searchEnd = minOf(buffer.length - 1, 120)
         val splitAt = buffer.lastIndexOf(' ', startIndex = searchEnd)
         if (splitAt > 20) {
             return splitAt + 1
@@ -1445,4 +1573,6 @@ private fun formatGracePeriodLabel(graceMs: Long): String {
     return "%.1fs".format(Locale.US, graceMs / 1000.0)
 }
 
+private const val ASSISTANT_SPEECH_IDLE_FLUSH_MS = 250L
+private const val ASSISTANT_TURN_SETTLE_MS = 250L
 private const val VOICE_LOG_TAG = "CodexVoice"
