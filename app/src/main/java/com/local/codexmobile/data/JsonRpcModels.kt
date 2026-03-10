@@ -55,5 +55,6 @@ data class UserInput(
 
 @Serializable
 data class TurnInterruptParams(
-    @SerialName("threadId") val threadId: String
+    @SerialName("threadId") val threadId: String,
+    @SerialName("turnId") val turnId: String
 )

@@ -11,8 +11,13 @@ import com.local.codexmobile.data.CodexAppServerClient
 import com.local.codexmobile.data.ServerStore
 import com.local.codexmobile.model.ChatMessage
 import com.local.codexmobile.model.ChatRole
+import com.local.codexmobile.model.DEFAULT_CLEAR_COMMAND
+import com.local.codexmobile.model.DEFAULT_INTERRUPT_COMMAND
+import com.local.codexmobile.model.DEFAULT_SEND_COMMAND
 import com.local.codexmobile.model.ServerConfig
 import com.local.codexmobile.model.ThreadSummary
+import com.local.codexmobile.model.VoiceCommandAction
+import com.local.codexmobile.model.VoiceControlSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
@@ -24,7 +29,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
-enum class Screen { SETUP, CHAT }
+enum class Screen { SETUP, CHAT, VOICE_SETTINGS }
 
 class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private val serverStore = ServerStore(application)
@@ -38,6 +43,8 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var activeThreadId by mutableStateOf<String?>(null)
         private set
+    var activeTurnId by mutableStateOf<String?>(null)
+        private set
     var activeCwd by mutableStateOf("/tmp")
     var status by mutableStateOf("Disconnected")
         private set
@@ -49,14 +56,18 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var currentScreen by mutableStateOf(Screen.SETUP)
         private set
+    var voiceControlSettings by mutableStateOf(VoiceControlSettings())
+        private set
 
     private var client: CodexAppServerClient? = null
+    private var lastScreenBeforeVoiceSettings = Screen.SETUP
 
     init {
         val loaded = serverStore.loadServers()
         servers.addAll(loaded)
         selectedServerId = loaded.firstOrNull()?.id
         recentCwds.addAll(serverStore.loadRecentCwds())
+        voiceControlSettings = serverStore.loadVoiceControlSettings()
     }
 
     fun selectServer(id: String) {
@@ -82,6 +93,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             threads.clear()
             messages.clear()
             activeThreadId = null
+            activeTurnId = null
         }
     }
 
@@ -108,6 +120,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                             isConnected = connected
                             if (!connected) {
                                 isThinking = false
+                                activeTurnId = null
                                 status = "Disconnected"
                             }
                         }
@@ -140,6 +153,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         client = null
         isConnected = false
         isThinking = false
+        activeTurnId = null
         status = "Disconnected"
     }
 
@@ -165,6 +179,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val threadId = rpc.startThread(cwd = cwd)
                 activeThreadId = threadId
+                activeTurnId = null
                 activeCwd = cwd
                 messages.clear()
                 status = "Thread started"
@@ -185,6 +200,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val response = rpc.resumeThread(summary.id, summary.cwd.ifBlank { "/tmp" })
                 activeThreadId = summary.id
+                activeTurnId = null
                 activeCwd = summary.cwd.ifBlank { "/tmp" }
                 messages.clear()
                 messages.addAll(restoreMessagesFromResume(response))
@@ -221,10 +237,12 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
 
                 messages.add(ChatMessage(role = ChatRole.USER, text = trimmed))
                 isThinking = true
+                activeTurnId = null
                 status = "Running turn"
-                rpc.sendTurn(threadId = threadId, text = trimmed)
+                activeTurnId = rpc.sendTurn(threadId = threadId, text = trimmed)
             } catch (t: Throwable) {
                 isThinking = false
+                activeTurnId = null
                 val err = "turn/start failed: ${t.message ?: "unknown"}"
                 status = err
                 blockingError = err
@@ -235,11 +253,14 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     fun interruptTurn() {
         val rpc = client ?: return
         val threadId = activeThreadId ?: return
+        val turnId = activeTurnId ?: run {
+            status = "Waiting for turn to start"
+            return
+        }
         viewModelScope.launch {
             try {
-                rpc.interrupt(threadId)
-                isThinking = false
-                status = "Turn interrupted"
+                rpc.interrupt(threadId, turnId)
+                status = "Interrupt requested"
             } catch (t: Throwable) {
                 val err = "interrupt failed: ${t.message ?: "unknown"}"
                 status = err
@@ -250,6 +271,63 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
 
     fun navigateToSetup() {
         currentScreen = Screen.SETUP
+    }
+
+    fun navigateToVoiceSettings() {
+        if (currentScreen != Screen.VOICE_SETTINGS) {
+            lastScreenBeforeVoiceSettings = currentScreen
+        }
+        currentScreen = Screen.VOICE_SETTINGS
+    }
+
+    fun navigateBackFromVoiceSettings() {
+        currentScreen = if (lastScreenBeforeVoiceSettings == Screen.VOICE_SETTINGS) {
+            Screen.SETUP
+        } else {
+            lastScreenBeforeVoiceSettings
+        }
+    }
+
+    fun setVoiceControlEnabled(enabled: Boolean) {
+        voiceControlSettings = voiceControlSettings.copy(enabled = enabled)
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun setReadResponsesAloud(enabled: Boolean) {
+        voiceControlSettings = voiceControlSettings.copy(readResponsesAloud = enabled)
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun setAutoSendAfterRecognition(enabled: Boolean) {
+        voiceControlSettings = voiceControlSettings.copy(autoSendAfterRecognition = enabled)
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun setAutoSendGracePeriodMs(gracePeriodMs: Long) {
+        voiceControlSettings = voiceControlSettings.copy(autoSendGracePeriodMs = gracePeriodMs.coerceIn(0L, 3_000L))
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun updateVoiceCommand(action: VoiceCommandAction, phrase: String) {
+        val trimmed = phrase.trim()
+        if (trimmed.isEmpty()) {
+            return
+        }
+        voiceControlSettings = when (action) {
+            VoiceCommandAction.SEND -> voiceControlSettings.copy(sendCommand = trimmed)
+            VoiceCommandAction.INTERRUPT -> voiceControlSettings.copy(interruptCommand = trimmed)
+            VoiceCommandAction.CLEAR -> voiceControlSettings.copy(clearCommand = trimmed)
+        }
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
+    }
+
+    fun resetVoiceCommandsToDefaults() {
+        voiceControlSettings = voiceControlSettings.copy(
+            sendCommand = DEFAULT_SEND_COMMAND,
+            interruptCommand = DEFAULT_INTERRUPT_COMMAND,
+            clearCommand = DEFAULT_CLEAR_COMMAND
+        )
+        serverStore.saveVoiceControlSettings(voiceControlSettings)
     }
 
     fun dismissBlockingError() {
@@ -270,8 +348,13 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleNotification(method: String, params: JsonObject?) {
         when (method) {
             "turn/started" -> {
-                isThinking = true
-                status = "Thinking"
+                val threadId = params?.get("threadId")?.jsonPrimitive?.contentOrNull
+                val turnId = params?.get("turn")?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull
+                if (threadId == null || threadId == activeThreadId) {
+                    activeTurnId = turnId ?: activeTurnId
+                    isThinking = true
+                    status = "Thinking"
+                }
             }
 
             "item/agentMessage/delta" -> {
@@ -282,9 +365,16 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             "turn/completed", "codex/event/task_complete" -> {
-                isThinking = false
-                status = "Ready"
-                refreshThreads()
+                val threadId = params?.get("threadId")?.jsonPrimitive?.contentOrNull
+                val turnId = params?.get("turn")?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull
+                if (threadId == null || threadId == activeThreadId) {
+                    if (turnId == null || turnId == activeTurnId) {
+                        activeTurnId = null
+                        isThinking = false
+                        status = "Ready"
+                    }
+                    refreshThreads()
+                }
             }
 
             "item/completed" -> {
