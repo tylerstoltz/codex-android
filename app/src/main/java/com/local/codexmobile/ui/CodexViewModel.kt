@@ -123,7 +123,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         status = "Disconnected"
     }
 
-    fun refreshThreads(updateStatus: Boolean = true) {
+    fun refreshThreads(updateStatus: Boolean = currentScreen != Screen.CHAT) {
         val rpc = client ?: return
         viewModelScope.launch {
             try {
@@ -148,7 +148,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                 status = "Thread started"
                 recordCwd(cwd)
                 currentScreen = Screen.CHAT
-                refreshThreads()
+                refreshThreads(updateStatus = false)
             } catch (t: Throwable) {
                 val err = "thread/start failed: ${t.message ?: "unknown"}"
                 status = err
@@ -195,7 +195,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                 val threadId = activeThreadId ?: rpc.startThread(cwd = activeCwd).also {
                     activeThreadId = it
                     recordCwd(activeCwd)
-                    refreshThreads()
+                    refreshThreads(updateStatus = false)
                 }
 
                 messages.add(ChatMessage(role = ChatRole.USER, text = trimmed))
@@ -327,7 +327,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         messages.addAll(restoreMessagesFromResume(response))
         activeTurnId = null
         isThinking = false
-        status = "Ready"
+        status = "Resumed ${threadId.take(10)}"
     }
 
     private suspend fun connectInternal(showBlockingError: Boolean): Boolean = connectionMutex.withLock {
@@ -399,7 +399,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             rpc.connect(server.host, server.port)
             rpc.initialize()
             isConnected = true
-            refreshThreadsInternal(rpc, updateStatus = activeThreadId == null)
+            refreshThreadsInternal(rpc, updateStatus = activeThreadId == null && currentScreen != Screen.CHAT)
             reattachActiveThreadIfNeeded(rpc)
             true
         } catch (t: Throwable) {
@@ -475,7 +475,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                         isThinking = false
                         status = "Ready"
                     }
-                    refreshThreads()
+                    refreshThreads(updateStatus = false)
                 }
             }
 
