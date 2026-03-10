@@ -841,6 +841,15 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                     IconButton(onClick = { viewModel.navigateToVoiceSettings() }) {
                         Icon(Icons.Default.Settings, contentDescription = "Voice Settings")
                     }
+                    if (viewModel.isConnected) {
+                        IconButton(onClick = { viewModel.disconnect() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Disconnect")
+                        }
+                    } else {
+                        IconButton(onClick = { viewModel.connect() }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = "Connect")
+                        }
+                    }
                     if (viewModel.isThinking) {
                         IconButton(onClick = { viewModel.interruptTurn() }) {
                             Icon(Icons.Default.Stop, contentDescription = "Interrupt")

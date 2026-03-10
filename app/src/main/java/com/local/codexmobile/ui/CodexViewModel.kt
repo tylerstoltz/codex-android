@@ -19,7 +19,11 @@ import com.local.codexmobile.model.ThreadSummary
 import com.local.codexmobile.model.VoiceCommandAction
 import com.local.codexmobile.model.VoiceControlSettings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -61,6 +65,9 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
 
     private var client: CodexAppServerClient? = null
     private var lastScreenBeforeVoiceSettings = Screen.SETUP
+    private val connectionMutex = Mutex()
+    private var reconnectJob: Job? = null
+    private var allowAutoReconnect = false
 
     init {
         val loaded = serverStore.loadServers()
@@ -98,57 +105,16 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
-        val server = selectedServer() ?: run {
-            status = "Select a server first"
-            blockingError = "Select a server first."
-            return
-        }
-
+        allowAutoReconnect = true
+        reconnectJob?.cancel()
         viewModelScope.launch {
-            try {
-                status = "Connecting to ${server.host}:${server.port}"
-                val rpc = CodexAppServerClient(
-                    onNotification = { method, params ->
-                        viewModelScope.launch(Dispatchers.Main) {
-                            try {
-                                handleNotification(method, params)
-                            } catch (_: Throwable) { }
-                        }
-                    },
-                    onConnectionChanged = { connected ->
-                        viewModelScope.launch(Dispatchers.Main) {
-                            isConnected = connected
-                            if (!connected) {
-                                isThinking = false
-                                activeTurnId = null
-                                status = "Disconnected"
-                            }
-                        }
-                    },
-                    onError = { message ->
-                        viewModelScope.launch(Dispatchers.Main) {
-                            val err = "Error: $message"
-                            status = err
-                            blockingError = err
-                        }
-                    }
-                )
-
-                client = rpc
-                rpc.connect(server.host, server.port)
-                rpc.initialize()
-                status = "Connected"
-                refreshThreads()
-            } catch (t: Throwable) {
-                val err = "Connect failed: ${t.message ?: "unknown"}"
-                status = err
-                blockingError = err
-                isConnected = false
-            }
+            connectInternal(showBlockingError = true)
         }
     }
 
     fun disconnect() {
+        allowAutoReconnect = false
+        reconnectJob?.cancel()
         client?.disconnect()
         client = null
         isConnected = false
@@ -157,14 +123,11 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         status = "Disconnected"
     }
 
-    fun refreshThreads() {
+    fun refreshThreads(updateStatus: Boolean = true) {
         val rpc = client ?: return
         viewModelScope.launch {
             try {
-                val list = rpc.listThreads()
-                threads.clear()
-                threads.addAll(list.sortedByDescending { it.updatedAt })
-                status = "Loaded ${threads.size} thread(s)"
+                refreshThreadsInternal(rpc, updateStatus)
             } catch (t: Throwable) {
                 val err = "thread/list failed: ${t.message ?: "unknown"}"
                 status = err
@@ -343,6 +306,145 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private fun selectedServer(): ServerConfig? {
         val id = selectedServerId ?: return null
         return servers.firstOrNull { it.id == id }
+    }
+
+    private suspend fun refreshThreadsInternal(rpc: CodexAppServerClient, updateStatus: Boolean) {
+        val list = rpc.listThreads()
+        threads.clear()
+        threads.addAll(list.sortedByDescending { it.updatedAt })
+        if (updateStatus) {
+            status = "Loaded ${threads.size} thread(s)"
+        }
+    }
+
+    private suspend fun reattachActiveThreadIfNeeded(rpc: CodexAppServerClient) {
+        val threadId = activeThreadId ?: run {
+            status = "Connected"
+            return
+        }
+        val response = rpc.resumeThread(threadId, activeCwd.ifBlank { "/tmp" })
+        messages.clear()
+        messages.addAll(restoreMessagesFromResume(response))
+        activeTurnId = null
+        isThinking = false
+        status = "Ready"
+    }
+
+    private suspend fun connectInternal(showBlockingError: Boolean): Boolean = connectionMutex.withLock {
+        val server = selectedServer() ?: run {
+            status = "Select a server first"
+            if (showBlockingError) {
+                blockingError = "Select a server first."
+            }
+            return false
+        }
+
+        return try {
+            status = "Connecting to ${server.host}:${server.port}"
+            lateinit var rpc: CodexAppServerClient
+            rpc = CodexAppServerClient(
+                onNotification = { method, params ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        if (client !== rpc) {
+                            return@launch
+                        }
+                        try {
+                            handleNotification(method, params)
+                        } catch (_: Throwable) { }
+                    }
+                },
+                onConnectionChanged = { connected ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        if (client !== rpc) {
+                            return@launch
+                        }
+                        isConnected = connected
+                        if (connected) {
+                            reconnectJob?.cancel()
+                            status = "Connected"
+                        } else {
+                            isThinking = false
+                            activeTurnId = null
+                            status = if (allowAutoReconnect) {
+                                "Disconnected, reconnecting..."
+                            } else {
+                                "Disconnected"
+                            }
+                            if (allowAutoReconnect) {
+                                scheduleReconnect()
+                            }
+                        }
+                    }
+                },
+                onError = { message ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        if (client !== rpc) {
+                            return@launch
+                        }
+                        val err = "Error: $message"
+                        status = if (allowAutoReconnect) {
+                            "Disconnected, reconnecting..."
+                        } else {
+                            err
+                        }
+                        if (!allowAutoReconnect && showBlockingError) {
+                            blockingError = err
+                        }
+                    }
+                }
+            )
+
+            client?.disconnect()
+            client = rpc
+            rpc.connect(server.host, server.port)
+            rpc.initialize()
+            isConnected = true
+            refreshThreadsInternal(rpc, updateStatus = activeThreadId == null)
+            reattachActiveThreadIfNeeded(rpc)
+            true
+        } catch (t: Throwable) {
+            client?.disconnect()
+            client = null
+            isConnected = false
+            val err = "Connect failed: ${t.message ?: "unknown"}"
+            status = if (allowAutoReconnect && !showBlockingError) {
+                "Reconnect failed, retrying..."
+            } else {
+                err
+            }
+            if (showBlockingError) {
+                blockingError = err
+            }
+            false
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (!allowAutoReconnect || reconnectJob?.isActive == true) {
+            return
+        }
+
+        reconnectJob = viewModelScope.launch {
+            var attempt = 0
+            while (allowAutoReconnect && !isConnected) {
+                attempt += 1
+                val delayMs = when (attempt) {
+                    1 -> 1_000L
+                    2 -> 2_000L
+                    3 -> 5_000L
+                    else -> 10_000L
+                }
+                delay(delayMs)
+                if (!allowAutoReconnect || isConnected) {
+                    break
+                }
+                status = "Reconnecting (attempt $attempt)..."
+                val connected = connectInternal(showBlockingError = false)
+                if (connected) {
+                    break
+                }
+            }
+        }
     }
 
     private fun handleNotification(method: String, params: JsonObject?) {

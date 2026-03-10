@@ -50,6 +50,7 @@ class CodexAppServerClient(
     private var input: BufferedInputStream? = null
     private var output: BufferedOutputStream? = null
     private var readerThread: Thread? = null
+    private var keepAliveThread: Thread? = null
 
     @Volatile
     private var closing: Boolean = false
@@ -84,6 +85,7 @@ class CodexAppServerClient(
     private fun connectOne(host: String, port: Int) {
         val sock = Socket()
         sock.tcpNoDelay = true
+        sock.keepAlive = true
         sock.connect(InetSocketAddress(host, port), 6000)
         sock.soTimeout = 0
 
@@ -99,6 +101,7 @@ class CodexAppServerClient(
         closing = false
         onConnectionChanged(true)
         startReaderLoop()
+        startKeepAliveLoop()
     }
 
     private fun performHandshake(
@@ -195,6 +198,30 @@ class CodexAppServerClient(
         }
     }
 
+    private fun startKeepAliveLoop() {
+        keepAliveThread = thread(start = true, name = "CodexWsKeepAlive") {
+            try {
+                while (!closing) {
+                    Thread.sleep(15_000L)
+                    if (closing || !isConnected) {
+                        break
+                    }
+                    val sent = sendControlFrame(0x9)
+                    if (!sent) {
+                        handleTransportFailure("Connection lost")
+                        break
+                    }
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } catch (t: Throwable) {
+                if (!closing) {
+                    handleTransportFailure(t.message ?: "Keepalive failure")
+                }
+            }
+        }
+    }
+
     private data class WsFrame(val opcode: Int, val payload: ByteArray)
 
     private fun readFrame(input: BufferedInputStream): WsFrame? {
@@ -242,8 +269,8 @@ class CodexAppServerClient(
         return data
     }
 
-    private fun sendControlFrame(opcode: Int, payload: ByteArray = ByteArray(0)) {
-        sendFrame(opcode, payload)
+    private fun sendControlFrame(opcode: Int, payload: ByteArray = ByteArray(0)): Boolean {
+        return sendFrame(opcode, payload)
     }
 
     private fun sendText(text: String): Boolean {
@@ -301,6 +328,7 @@ class CodexAppServerClient(
         input = null
         output = null
         readerThread = null
+        keepAliveThread = null
     }
 
     private fun candidateHosts(raw: String): List<String> {
