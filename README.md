@@ -104,3 +104,10 @@ ss -lntp | grep 8390
 cd codex-android
 ./gradlew :app:installDebug
 ```
+
+- Uninstall and reinstall (needed when switching build PCs or signing keys change):
+
+```bash
+adb uninstall com.local.codexmobile
+./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
+```

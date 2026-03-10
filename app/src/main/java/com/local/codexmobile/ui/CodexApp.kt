@@ -14,7 +14,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -32,8 +31,6 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -234,7 +231,6 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     var autoSendStatus by remember { mutableStateOf<String?>(null) }
     var previousThinking by remember { mutableStateOf(viewModel.isThinking) }
     val messageListState = rememberLazyListState()
-    val bottomAnchorRequester = remember { BringIntoViewRequester() }
     val imeBottom = WindowInsets.ime.getBottom(density)
     val shouldNarrateResponses =
         viewModel.voiceControlSettings.enabled && viewModel.voiceControlSettings.readResponsesAloud
@@ -555,8 +551,8 @@ private fun ChatScreen(viewModel: CodexViewModel) {
 
     LaunchedEffect(viewModel.messages.size, latestAssistantText, imeBottom) {
         if (viewModel.messages.isNotEmpty()) {
-            bottomAnchorRequester.bringIntoView()
-            messageListState.animateScrollBy(Float.MAX_VALUE)
+            // Scroll to the spacer item (index = messages.size) to reach the true bottom
+            messageListState.scrollToItem(viewModel.messages.size)
         }
     }
 
@@ -865,8 +861,8 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                             Icon(Icons.Default.Close, contentDescription = "Disconnect")
                         }
                     } else {
-                        IconButton(onClick = { viewModel.connect() }) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = "Connect")
+                        IconButton(onClick = { viewModel.reconnect() }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = "Reconnect")
                         }
                     }
                     if (viewModel.isThinking) {
@@ -897,11 +893,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                     MessageBubble(message = message)
                 }
                 item {
-                    Spacer(
-                        modifier = Modifier
-                            .height(1.dp)
-                            .bringIntoViewRequester(bottomAnchorRequester)
-                    )
+                    Spacer(modifier = Modifier.height(1.dp))
                 }
             }
 

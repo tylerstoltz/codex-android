@@ -107,6 +107,20 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     fun connect() {
         allowAutoReconnect = true
         reconnectJob?.cancel()
+        // Clear active thread so we connect to the server cleanly.
+        // The user will pick a session from the thread list or start a new one.
+        activeThreadId = null
+        activeTurnId = null
+        messages.clear()
+        viewModelScope.launch {
+            connectInternal(showBlockingError = true)
+        }
+    }
+
+    /** Reconnect preserving the current active thread (used from the chat screen). */
+    fun reconnect() {
+        allowAutoReconnect = true
+        reconnectJob?.cancel()
         viewModelScope.launch {
             connectInternal(showBlockingError = true)
         }
@@ -322,12 +336,20 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             status = "Connected"
             return
         }
-        val response = rpc.resumeThread(threadId, activeCwd.ifBlank { "/tmp" })
-        messages.clear()
-        messages.addAll(restoreMessagesFromResume(response))
-        activeTurnId = null
-        isThinking = false
-        status = "Resumed ${threadId.take(10)}"
+        try {
+            val response = rpc.resumeThread(threadId, activeCwd.ifBlank { "/tmp" })
+            messages.clear()
+            messages.addAll(restoreMessagesFromResume(response))
+            activeTurnId = null
+            isThinking = false
+            status = "Resumed ${threadId.take(10)}"
+        } catch (_: Throwable) {
+            // Thread no longer exists on this server; clear and stay connected
+            activeThreadId = null
+            activeTurnId = null
+            isThinking = false
+            status = "Connected"
+        }
     }
 
     private suspend fun connectInternal(showBlockingError: Boolean): Boolean = connectionMutex.withLock {
