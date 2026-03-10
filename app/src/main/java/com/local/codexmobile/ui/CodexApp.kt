@@ -97,7 +97,7 @@ fun CodexApp(viewModel: CodexViewModel = viewModel()) {
         AlertDialog(
             onDismissRequest = {},
             title = { Text("Connection Error") },
-            text = { Text(message) },
+            text = { Text(stripMarkdown(message)) },
             confirmButton = {
                 Button(onClick = { viewModel.dismissBlockingError() }) {
                     Text("Close")
@@ -199,7 +199,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     val context = LocalContext.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var inputText by remember { mutableStateOf("") }
-    var isListeningForMessage by remember { mutableStateOf(false) }
+    var activeVoiceCaptureMode by remember { mutableStateOf<VoiceCaptureMode?>(null) }
     var voiceInputStatus by remember { mutableStateOf<String?>(null) }
     var isSpeakingResponse by remember { mutableStateOf(false) }
     var ttsReady by remember { mutableStateOf(false) }
@@ -209,7 +209,8 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     var narrateCurrentTurn by remember { mutableStateOf(false) }
     var narratedAssistantLength by remember { mutableStateOf(0) }
     var pendingSpeechBuffer by remember { mutableStateOf("") }
-    var pendingAutoListen by remember { mutableStateOf(false) }
+    var pendingMessageAutoListen by remember { mutableStateOf(false) }
+    var pendingInterruptAutoListen by remember { mutableStateOf(false) }
     var previousThinking by remember { mutableStateOf(viewModel.isThinking) }
     val messageListState = rememberLazyListState()
     val shouldNarrateResponses =
@@ -345,39 +346,83 @@ private fun ChatScreen(viewModel: CodexViewModel) {
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        isListeningForMessage = false
+        val captureMode = activeVoiceCaptureMode
+        activeVoiceCaptureMode = null
         val spokenText = result.data
             ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             ?.firstOrNull()
             ?.trim()
             .orEmpty()
 
+        if (captureMode == null) {
+            return@rememberLauncherForActivityResult
+        }
+
         if (result.resultCode == Activity.RESULT_OK && spokenText.isNotBlank()) {
-            voiceInputStatus = null
-            applyDraftValue(spokenText)
+            when (captureMode) {
+                VoiceCaptureMode.MESSAGE -> {
+                    voiceInputStatus = null
+                    applyDraftValue(spokenText)
+                }
+
+                VoiceCaptureMode.INTERRUPT -> {
+                    val command = parseVoiceCommandFromDraft(spokenText, viewModel.voiceControlSettings)
+                    if (command?.action == VoiceCommandAction.INTERRUPT) {
+                        voiceInputStatus = null
+                        viewModel.interruptTurn()
+                    } else {
+                        voiceInputStatus = "Interrupt phrase not recognized."
+                        if (viewModel.isThinking && viewModel.activeTurnId != null) {
+                            pendingInterruptAutoListen = true
+                        }
+                    }
+                }
+            }
         } else {
-            voiceInputStatus = "No speech captured."
+            voiceInputStatus = if (captureMode == VoiceCaptureMode.INTERRUPT) {
+                "No interrupt phrase captured."
+            } else {
+                "No speech captured."
+            }
+            if (captureMode == VoiceCaptureMode.INTERRUPT && viewModel.isThinking && viewModel.activeTurnId != null) {
+                pendingInterruptAutoListen = true
+            }
         }
     }
 
-    fun startVoiceInput(auto: Boolean) {
+    fun startVoiceInput(auto: Boolean, mode: VoiceCaptureMode = VoiceCaptureMode.MESSAGE) {
         if (
             !viewModel.voiceControlSettings.enabled ||
             !viewModel.isConnected ||
-            viewModel.isThinking ||
-            isListeningForMessage ||
+            activeVoiceCaptureMode != null ||
             (shouldNarrateResponses && isSpeakingResponse)
         ) {
             return
         }
-        isListeningForMessage = true
-        voiceInputStatus = if (auto) "Listening for next message..." else "Listening..."
+        if (mode == VoiceCaptureMode.MESSAGE && viewModel.isThinking) {
+            return
+        }
+        if (mode == VoiceCaptureMode.INTERRUPT && (!viewModel.isThinking || viewModel.activeTurnId == null)) {
+            return
+        }
+        activeVoiceCaptureMode = mode
+        voiceInputStatus = when (mode) {
+            VoiceCaptureMode.MESSAGE ->
+                if (auto) "Listening for next message..." else "Listening..."
+            VoiceCaptureMode.INTERRUPT ->
+                "Listening for \"${viewModel.voiceControlSettings.interruptCommand}\"..."
+        }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
             putExtra(
                 RecognizerIntent.EXTRA_PROMPT,
-                if (auto) "Speak your next message" else "Speak your message"
+                when (mode) {
+                    VoiceCaptureMode.MESSAGE ->
+                        if (auto) "Speak your next message" else "Speak your message"
+                    VoiceCaptureMode.INTERRUPT ->
+                        "Say \"${viewModel.voiceControlSettings.interruptCommand}\" to stop the turn"
+                }
             )
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
@@ -385,7 +430,7 @@ private fun ChatScreen(viewModel: CodexViewModel) {
         try {
             speechLauncher.launch(intent)
         } catch (_: ActivityNotFoundException) {
-            isListeningForMessage = false
+            activeVoiceCaptureMode = null
             voiceInputStatus = "Speech recognizer is not available on this device."
         }
     }
@@ -473,46 +518,75 @@ private fun ChatScreen(viewModel: CodexViewModel) {
 
     LaunchedEffect(viewModel.voiceControlSettings.enabled) {
         if (!viewModel.voiceControlSettings.enabled) {
-            pendingAutoListen = false
+            pendingMessageAutoListen = false
+            pendingInterruptAutoListen = false
             voiceInputStatus = null
             return@LaunchedEffect
         }
         if (viewModel.isConnected && !viewModel.isThinking && inputText.isBlank()) {
-            pendingAutoListen = true
+            pendingMessageAutoListen = true
         }
     }
 
-    LaunchedEffect(viewModel.isThinking, viewModel.voiceControlSettings.enabled) {
+    LaunchedEffect(viewModel.isThinking, viewModel.activeTurnId, viewModel.voiceControlSettings.enabled) {
         if (!viewModel.voiceControlSettings.enabled) {
             previousThinking = viewModel.isThinking
-            pendingAutoListen = false
+            pendingMessageAutoListen = false
+            pendingInterruptAutoListen = false
             return@LaunchedEffect
         }
+        if (viewModel.isThinking && viewModel.activeTurnId != null) {
+            pendingInterruptAutoListen = true
+        }
         if (previousThinking && !viewModel.isThinking) {
-            pendingAutoListen = true
+            pendingMessageAutoListen = true
         }
         previousThinking = viewModel.isThinking
     }
 
     LaunchedEffect(
-        pendingAutoListen,
+        pendingMessageAutoListen,
         viewModel.voiceControlSettings.enabled,
         viewModel.isConnected,
         viewModel.isThinking,
-        isListeningForMessage,
+        activeVoiceCaptureMode,
         shouldNarrateResponses,
         isSpeakingResponse
     ) {
         if (
-            pendingAutoListen &&
+            pendingMessageAutoListen &&
             viewModel.voiceControlSettings.enabled &&
             viewModel.isConnected &&
             !viewModel.isThinking &&
-            !isListeningForMessage &&
+            activeVoiceCaptureMode == null &&
             (!shouldNarrateResponses || !isSpeakingResponse)
         ) {
-            pendingAutoListen = false
-            startVoiceInput(auto = true)
+            pendingMessageAutoListen = false
+            startVoiceInput(auto = true, mode = VoiceCaptureMode.MESSAGE)
+        }
+    }
+
+    LaunchedEffect(
+        pendingInterruptAutoListen,
+        viewModel.voiceControlSettings.enabled,
+        viewModel.isConnected,
+        viewModel.isThinking,
+        viewModel.activeTurnId,
+        activeVoiceCaptureMode,
+        shouldNarrateResponses,
+        isSpeakingResponse
+    ) {
+        if (
+            pendingInterruptAutoListen &&
+            viewModel.voiceControlSettings.enabled &&
+            viewModel.isConnected &&
+            viewModel.isThinking &&
+            viewModel.activeTurnId != null &&
+            activeVoiceCaptureMode == null &&
+            (!shouldNarrateResponses || !isSpeakingResponse)
+        ) {
+            pendingInterruptAutoListen = false
+            startVoiceInput(auto = true, mode = VoiceCaptureMode.INTERRUPT)
         }
     }
 
@@ -581,11 +655,12 @@ private fun ChatScreen(viewModel: CodexViewModel) {
                         inputText = ""
                     },
                     onInterrupt = viewModel::interruptTurn,
-                    onStartVoiceInput = { startVoiceInput(auto = false) },
+                    onStartVoiceInput = { startVoiceInput(auto = false, mode = VoiceCaptureMode.MESSAGE) },
                     isThinking = viewModel.isThinking,
+                    canInterrupt = viewModel.activeTurnId != null,
                     enabled = viewModel.isConnected,
                     voiceControlSettings = viewModel.voiceControlSettings,
-                    isListeningForVoiceInput = isListeningForMessage,
+                    isListeningForVoiceInput = activeVoiceCaptureMode != null,
                     voiceInputStatus = voiceInputStatus
                 )
             }
@@ -1005,6 +1080,7 @@ private fun InputSection(
     onInterrupt: () -> Unit,
     onStartVoiceInput: () -> Unit,
     isThinking: Boolean,
+    canInterrupt: Boolean,
     enabled: Boolean,
     voiceControlSettings: VoiceControlSettings,
     isListeningForVoiceInput: Boolean,
@@ -1043,7 +1119,7 @@ private fun InputSection(
                 Spacer(modifier = Modifier.size(6.dp))
                 Text("Send")
             }
-            Button(onClick = onInterrupt, enabled = enabled && isThinking) {
+            Button(onClick = onInterrupt, enabled = enabled && isThinking && canInterrupt) {
                 Icon(Icons.Default.Stop, contentDescription = null)
                 Spacer(modifier = Modifier.size(6.dp))
                 Text("Interrupt")
@@ -1092,6 +1168,11 @@ private data class VoiceCommandMatch(
     val action: VoiceCommandAction,
     val payload: String
 )
+
+private enum class VoiceCaptureMode {
+    MESSAGE,
+    INTERRUPT
+}
 
 private data class DraftToken(
     val normalized: String,

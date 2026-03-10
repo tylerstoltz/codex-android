@@ -43,6 +43,8 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var activeThreadId by mutableStateOf<String?>(null)
         private set
+    var activeTurnId by mutableStateOf<String?>(null)
+        private set
     var activeCwd by mutableStateOf("/tmp")
     var status by mutableStateOf("Disconnected")
         private set
@@ -91,6 +93,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             threads.clear()
             messages.clear()
             activeThreadId = null
+            activeTurnId = null
         }
     }
 
@@ -117,6 +120,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
                             isConnected = connected
                             if (!connected) {
                                 isThinking = false
+                                activeTurnId = null
                                 status = "Disconnected"
                             }
                         }
@@ -149,6 +153,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
         client = null
         isConnected = false
         isThinking = false
+        activeTurnId = null
         status = "Disconnected"
     }
 
@@ -174,6 +179,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val threadId = rpc.startThread(cwd = cwd)
                 activeThreadId = threadId
+                activeTurnId = null
                 activeCwd = cwd
                 messages.clear()
                 status = "Thread started"
@@ -194,6 +200,7 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val response = rpc.resumeThread(summary.id, summary.cwd.ifBlank { "/tmp" })
                 activeThreadId = summary.id
+                activeTurnId = null
                 activeCwd = summary.cwd.ifBlank { "/tmp" }
                 messages.clear()
                 messages.addAll(restoreMessagesFromResume(response))
@@ -230,10 +237,12 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
 
                 messages.add(ChatMessage(role = ChatRole.USER, text = trimmed))
                 isThinking = true
+                activeTurnId = null
                 status = "Running turn"
-                rpc.sendTurn(threadId = threadId, text = trimmed)
+                activeTurnId = rpc.sendTurn(threadId = threadId, text = trimmed)
             } catch (t: Throwable) {
                 isThinking = false
+                activeTurnId = null
                 val err = "turn/start failed: ${t.message ?: "unknown"}"
                 status = err
                 blockingError = err
@@ -244,11 +253,14 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     fun interruptTurn() {
         val rpc = client ?: return
         val threadId = activeThreadId ?: return
+        val turnId = activeTurnId ?: run {
+            status = "Waiting for turn to start"
+            return
+        }
         viewModelScope.launch {
             try {
-                rpc.interrupt(threadId)
-                isThinking = false
-                status = "Turn interrupted"
+                rpc.interrupt(threadId, turnId)
+                status = "Interrupt requested"
             } catch (t: Throwable) {
                 val err = "interrupt failed: ${t.message ?: "unknown"}"
                 status = err
@@ -326,8 +338,13 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleNotification(method: String, params: JsonObject?) {
         when (method) {
             "turn/started" -> {
-                isThinking = true
-                status = "Thinking"
+                val threadId = params?.get("threadId")?.jsonPrimitive?.contentOrNull
+                val turnId = params?.get("turn")?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull
+                if (threadId == null || threadId == activeThreadId) {
+                    activeTurnId = turnId ?: activeTurnId
+                    isThinking = true
+                    status = "Thinking"
+                }
             }
 
             "item/agentMessage/delta" -> {
@@ -338,9 +355,16 @@ class CodexViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             "turn/completed", "codex/event/task_complete" -> {
-                isThinking = false
-                status = "Ready"
-                refreshThreads()
+                val threadId = params?.get("threadId")?.jsonPrimitive?.contentOrNull
+                val turnId = params?.get("turn")?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull
+                if (threadId == null || threadId == activeThreadId) {
+                    if (turnId == null || turnId == activeTurnId) {
+                        activeTurnId = null
+                        isThinking = false
+                        status = "Ready"
+                    }
+                    refreshThreads()
+                }
             }
 
             "item/completed" -> {

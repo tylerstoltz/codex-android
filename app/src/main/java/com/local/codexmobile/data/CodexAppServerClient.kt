@@ -399,8 +399,13 @@ class CodexAppServerClient(
         return result.jsonObject
     }
 
-    suspend fun sendTurn(threadId: String, text: String, model: String? = null, effort: String? = null) {
-        sendRequest(
+    suspend fun sendTurn(
+        threadId: String,
+        text: String,
+        model: String? = null,
+        effort: String? = null
+    ): String {
+        val result = sendRequest(
             method = "turn/start",
             params = json.encodeToJsonElement(
                 TurnStartParams(
@@ -410,13 +415,16 @@ class CodexAppServerClient(
                     effort = effort
                 )
             )
-        )
+        ).jsonObject
+
+        return result["turn"]?.jsonObject?.get("id")?.jsonPrimitive?.content
+            ?: error("Missing turn id")
     }
 
-    suspend fun interrupt(threadId: String) {
+    suspend fun interrupt(threadId: String, turnId: String) {
         sendRequest(
             method = "turn/interrupt",
-            params = json.encodeToJsonElement(TurnInterruptParams(threadId = threadId))
+            params = json.encodeToJsonElement(TurnInterruptParams(threadId = threadId, turnId = turnId))
         )
     }
 
